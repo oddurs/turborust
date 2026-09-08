@@ -34,6 +34,24 @@ working. The README says so rather than implying support.
   Starting the reader after the child on Windows made no difference, and the
   change was reverted rather than kept as unverified platform-specific code.
 
+## Wider than the two unit tests
+
+The integration suites (`tests/run_path.rs`, `tests/supervisor.rs`) are also
+Unix-gated, for a different and more tractable reason: every fixture in them is a
+POSIX shell snippet, and turborust spawns through `cmd /C` on Windows.
+
+The fix for that half is a **configurable shell**:
+
+```toml
+[project]
+shell = "bash"          # or the platform default
+```
+
+Windows runners have Git Bash, so this would make the whole suite portable and is
+independently useful — plenty of Windows developers would rather write their
+task commands in one shell than two. It is a small, well-understood change, and
+unlike the pty problem it does not need anyone to debug ConPTY.
+
 ## Where to look next
 
 Someone who can run Windows directly, rather than iterating against CI — that
@@ -54,3 +72,4 @@ Candidates worth checking first:
 - [ ] The cause is identified rather than worked around
 - [ ] Both tests run and pass on windows-latest
 - [ ] The `#[cfg(unix)]` gates are removed
+- [ ] A configurable shell makes the integration fixtures portable

@@ -345,7 +345,9 @@ own right, not a feature.
 - macOS and Linux are fully exercised. On Windows, 165 of 167 tests pass in CI;
   the two that do not are the pty tests, which capture no child output there.
   Windows pty behaviour — and the job-object process teardown those tests would
-  exercise — is therefore **unverified** rather than working (`0062`).
+  exercise — is therefore **unverified** rather than working. The integration
+  suites are Unix-gated too, because their fixtures are POSIX shell and turborust
+  spawns through `cmd /C` there; a configurable shell would fix that half (`0062`).
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
 
