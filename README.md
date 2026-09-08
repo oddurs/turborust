@@ -342,9 +342,10 @@ own right, not a feature.
   your build. `turborust doctor` targets that floor directly.
 - Shared caching is filesystem-based (a mount or synced folder). There is no
   HTTP cache server, and no authentication beyond the filesystem's own.
-- macOS and Linux are exercised locally. The Windows process-tree teardown is
-  written and compile-checked against the real target, but has not been run;
-  CI covers it on `windows-latest`.
+- macOS and Linux are fully exercised. On Windows, 165 of 167 tests pass in CI;
+  the two that do not are the pty tests, which capture no child output there.
+  Windows pty behaviour — and the job-object process teardown those tests would
+  exercise — is therefore **unverified** rather than working (`0062`).
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
 

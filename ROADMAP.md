@@ -131,13 +131,14 @@ Documented, tested, and safe to depend on.
 
 ## later — Not now, not never
 
-`#########·` 89% · 8 of 9 done
+`########··` 80% · 8 of 10 done
 
 Good ideas without a date yet.
 
 ### backlog
 
 - [ ] `0061` Dynamic completion for node names <sup>feature · p3</sup>
+- [ ] `0062` pty output capture is unverified on Windows <sup>bug · p2</sup>
 
 ### done
 
