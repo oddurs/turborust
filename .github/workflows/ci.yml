@@ -58,6 +58,18 @@ jobs:
           fi
           echo "clean"
 
+  schema:
+    name: schema is in sync
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Committed because editors fetch it by URL, so it has to exist — but
+      # generated, so it must not be allowed to drift from the types.
+      - run: cargo run --quiet -- schema > turborust.schema.json
+      - run: git diff --exit-code turborust.schema.json
+
   roadmap:
     name: roadmap is in sync
     runs-on: ubuntu-latest

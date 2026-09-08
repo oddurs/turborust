@@ -11,6 +11,12 @@ categories = ["development-tools", "command-line-utilities"]
 # The demo under examples/ is its own cargo workspace, not a cargo example target.
 autoexamples = false
 
+# Taking our own `turborust doctor` advice. Full DWARF is the largest single
+# contributor to link time, and line tables keep backtraces and panic locations
+# intact — which is all a dev loop needs from debug info.
+[profile.dev]
+debug = "line-tables-only"
+
 [features]
 # Pure-Rust blake3. Lets the Windows target be compile-checked from a host that
 # has no MSVC assembler:

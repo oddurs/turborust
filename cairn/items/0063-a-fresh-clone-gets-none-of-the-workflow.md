@@ -2,8 +2,10 @@
 id: 63
 title: A fresh clone gets none of the workflow
 type: bug
-status: backlog
+status: doing
 milestone: v1.1
+assignee: Oddur Sigurdsson
+claimed: 2026-09-08
 created: 2026-09-08
 updated: 2026-09-08
 priority: p1
@@ -38,7 +40,7 @@ and points at it rather than silently working without them.
 
 ## Acceptance criteria
 
-- [ ] `scripts/setup` installs hooks and the commit template, and is safe to rerun
-- [ ] `scripts/agent` warns when the hooks are not installed
-- [ ] A fresh clone is one documented command away from the full workflow
-- [ ] The repository takes its own doctor advice where that advice is portable
+- [x] `scripts/setup` installs hooks and the commit template, and is safe to rerun
+- [x] `scripts/agent` warns when the hooks are not installed
+- [x] A fresh clone is one documented command away from the full workflow
+- [x] The repository takes its own doctor advice where that advice is portable

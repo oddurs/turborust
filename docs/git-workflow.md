@@ -8,10 +8,22 @@ agents working at once. Everything below is enforced by a hook or a script rathe
 than by memory, because a convention that depends on discipline is a convention
 that decays.
 
+## First, once
+
+```sh
+scripts/setup
+```
+
+Installs the hooks and the commit template. Both live in *local git config*
+rather than tracked content, so a clone gets the files and none of the
+enforcement — `scripts/setup --check` reports without changing anything, and CI
+is not a substitute for it.
+
 ## The loop
 
 ```
-scripts/agent start 0041          # worktree + branch + claim the tracker item
+scripts/agent new bug "title"     # file a tracker item and branch for it
+scripts/agent start 0041          # or take one that already exists
 cd ../.worktrees/turborust/fix-0041-...
                                   # do the work
 scripts/agent check               # formatter, linter, tests, roadmap

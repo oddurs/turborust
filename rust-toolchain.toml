@@ -1,0 +1,8 @@
+# Pinned so everyone — and CI — builds with the same compiler. `rustup` reads
+# this automatically, which is also why turborust does not manage toolchains
+# itself (see item 0056).
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+# Lets `just check-windows` work from macOS or Linux without a separate step.
+targets = ["x86_64-pc-windows-msvc"]

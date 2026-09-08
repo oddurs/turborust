@@ -89,7 +89,7 @@ Enough to dogfood in a real project.
 
 The gaps that are not polish, but holes in what is already claimed.
 
-### backlog
+### in progress
 
 - [ ] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
