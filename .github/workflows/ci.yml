@@ -38,6 +38,26 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
 
+  hygiene:
+    name: commit hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The commit-msg hook catches this locally; CI catches it when someone
+      # pushed with --no-verify, or from a machine without the hooks installed.
+      - name: no tool attribution in commit messages
+        run: |
+          range="${{ github.event.pull_request.base.sha }}..HEAD"
+          [ -n "${{ github.event.pull_request.base.sha }}" ] || range="HEAD~1..HEAD"
+          if git log "$range" --format='%B' \
+             | grep -inE 'co-authored-by:.*(claude|anthropic|copilot|cursor|gpt)|generated with|🤖|ai-generated'; then
+            echo "::error::commit messages must not attribute work to a tool"
+            exit 1
+          fi
+          echo "clean"
+
   roadmap:
     name: roadmap is in sync
     runs-on: ubuntu-latest

@@ -155,10 +155,17 @@ $(cairn show "$refs" 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g')"
 }
 
 cmd_list() {
-    git worktree list | grep -v "^$repo_root " | while read -r dir _ branch; do
+    # Collected first rather than piped: `grep` finding nothing exits 1, and
+    # under `pipefail` that would abort the script instead of printing "none".
+    local rows
+    rows=$(git worktree list | grep -v "^$repo_root " || true)
+    if [ -z "$rows" ]; then
+        dim "  no active worktrees"
+        return 0
+    fi
+    printf '%s\n' "$rows" | while read -r dir _ branch; do
         printf '  \033[1m%s\033[0m\n    %s\n' "${branch//[\[\]]/}" "$dir"
     done
-    git worktree list | grep -qv "^$repo_root " || dim "  no active worktrees"
 }
 
 cmd_clean() {
@@ -176,7 +183,11 @@ cmd_clean() {
         fi
     done < <(git worktree list)
     git worktree prune
-    [ "$removed" -eq 0 ] && dim "  nothing merged to clean up" || say "removed $removed"
+    if [ "$removed" -eq 0 ]; then
+        dim "  nothing merged to clean up"
+    else
+        say "removed $removed"
+    fi
 }
 
 case "${1:-}" in
