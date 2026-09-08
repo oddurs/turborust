@@ -106,5 +106,10 @@ State the problem, the approach, and what a reviewer should be sceptical about.
 The template has a section for that last one; filling it in with "nothing" is a
 real answer, leaving it blank is not.
 
+Merge with a squash, then `scripts/agent clean`. Do not pass `--delete-branch` to
+`gh pr merge`: git refuses to delete a branch that a worktree still holds, so the
+deletion fails and takes the remote cleanup with it. `clean` removes the worktree
+first and then the branch, locally and on the remote.
+
 `scripts/agent pr` builds the description from the branch's commits and appends
 the tracker item, so the PR and the item cannot drift apart.
