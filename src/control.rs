@@ -716,7 +716,7 @@ mod path_tests {
         // The path that exposed this: a session scratch directory nested six
         // levels down blew past sun_path and bind failed with a bare EINVAL.
         let deep = PathBuf::from(
-            "/private/tmp/claude-501/-Users-someone-Code-turborust/\
+            "/private/var/folders/qv/bszyc4s6n3fnt6hj1vt17n8/T/session-7f3a2c/\
              c1191035-1d98-436a-babc-25bb33b6621d/scratchpad/connect/.turborust",
         );
         let path = socket_path(&deep);
