@@ -1,0 +1,61 @@
+[package]
+name = "turborust"
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "A dev orchestrator for full-Rust stacks: supervise, watch, cache, explain."
+repository = "https://github.com/oddurs/turborust"
+readme = "README.md"
+keywords = ["cargo", "watch", "dev-server", "monorepo", "supervisor"]
+categories = ["development-tools", "command-line-utilities"]
+# The demo under examples/ is its own cargo workspace, not a cargo example target.
+autoexamples = false
+
+[features]
+# Pure-Rust blake3. Lets the Windows target be compile-checked from a host that
+# has no MSVC assembler:
+#     cargo check --target x86_64-pc-windows-msvc --features portable-hash
+# Slower than the assembly path; not for release builds.
+portable-hash = ["blake3/pure"]
+
+# HTTPS for the static server. Off by default: it pulls in a TLS stack whose
+# crypto backend needs a C toolchain (cmake/nasm) at build time, and making every
+# install depend on that to serve a dev frontend is a bad trade. Turn it on with
+# `--features tls` if you need a secure context.
+tls = ["dep:axum-server", "dep:rustls"]
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.60", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+] }
+
+[dependencies]
+ansi-to-tui = "8.0.1"
+anyhow = "1.0.104"
+axum = "0.8.9"
+axum-server = { optional = true, version = "0.8.0", default-features = false, features = ["tls-rustls-no-provider"] }
+blake3 = "1.8.7"
+clap = { version = "4.6.6", features = ["derive"] }
+clap_complete = "4.6.9"
+clap_mangen = "0.3.3"
+crossterm = "0.29.0"
+globset = "0.4.20"
+hyper = { version = "1.11.1", features = ["client", "http1"] }
+hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1", "tokio"] }
+ignore = "0.4.33"
+libc = "0.2.189"
+notify = "8.2.0"
+notify-debouncer-full = "0.7.0"
+notify-rust = "4.18.0"
+portable-pty = "0.9.0"
+ratatui = "0.30.2"
+rustls = { optional = true, version = "0.23.44", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+schemars = "1.2.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.1", features = ["full"] }
+tokio-stream = { version = "0.1.19", features = ["sync", "time"] }
+toml = "1.1.5"
+tower-http = { version = "0.7.1", features = ["fs", "set-header"] }

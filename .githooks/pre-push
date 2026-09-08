@@ -1,0 +1,17 @@
+#!/bin/sh
+# The full gate. Everything a reviewer would otherwise have to catch.
+
+set -eu
+printf '  linting…\n'
+if ! cargo clippy --all-targets --quiet -- -D warnings 2>&1 | tail -20; then
+    printf '\n  push rejected: clippy found problems\n\n' >&2
+    exit 1
+fi
+
+printf '  testing…\n'
+if ! cargo test --quiet 2>&1 | grep -qE '^test result: ok'; then
+    printf '\n  push rejected: tests are failing\n\n    run: cargo test\n\n' >&2
+    exit 1
+fi
+
+printf '  green\n'

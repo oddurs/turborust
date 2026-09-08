@@ -1,0 +1,10 @@
+# <type>(<scope>): <imperative summary, under 72 chars, no trailing period>
+#
+# Why this change, not what it does — the diff already says what.
+# Wrap at 72.
+#
+# Refs: <tracker id>
+#
+# type: feat fix chore docs perf refactor test build ci
+#
+# Never add an AI co-author trailer or a generated-by footer.
