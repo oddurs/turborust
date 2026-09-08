@@ -187,6 +187,38 @@ mod tests {
         assert!(!any_match(&paths, &none));
     }
 
+    /// Writes repeatedly until the watcher reports the file, or time runs out.
+    ///
+    /// Waiting longer is not enough on its own: if the write lands before the OS
+    /// watch is armed, no event is ever generated and there is nothing to wait
+    /// for. Repeating the stimulus is what makes the test measure the watcher
+    /// rather than the machine's scheduling.
+    async fn write_until_seen(w: &mut Watcher, root: &Path, rel: &str) -> BTreeSet<String> {
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut attempt = 0;
+        while tokio::time::Instant::now() < deadline {
+            attempt += 1;
+            let _ = std::fs::write(root.join(rel), format!("// attempt {attempt}\n"));
+            match tokio::time::timeout(Duration::from_millis(500), w.recv()).await {
+                Ok(Some(batch)) => {
+                    seen.extend(batch);
+                    if seen
+                        .iter()
+                        .any(|p| p.ends_with(rel.rsplit('/').next().unwrap()))
+                    {
+                        return seen;
+                    }
+                }
+                Ok(None) => {
+                    panic!("the watch channel closed after {attempt} attempt(s); saw {seen:?}")
+                }
+                Err(_) => {}
+            }
+        }
+        seen
+    }
+
     #[tokio::test]
     async fn sees_a_real_write() {
         let dir = std::env::temp_dir().join(format!("turborust-watch-{}", std::process::id()));
@@ -234,14 +266,33 @@ mod guard_lifetime_tests {
         let mut rx = hand_off(&root);
         tokio::time::sleep(Duration::from_millis(400)).await;
 
-        std::fs::write(root.join("src/a.rs"), "fn main() {}").unwrap();
-        let got = tokio::time::timeout(Duration::from_secs(10), rx.recv()).await;
+        // Retried for the same reason as `sees_a_real_write`: a write landing
+        // before the OS watch is armed produces no event at all, so waiting
+        // longer cannot help. A *closed* channel is different — that is the bug
+        // this test exists to catch, so it fails immediately and says so.
+        let mut seen: BTreeSet<String> = BTreeSet::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let mut attempt = 0;
+        // Keep going until the *file* is seen, not until anything is: FSEvents
+        // often reports the parent directory first, and stopping there is what
+        // made this flake with `saw {"src"}`.
+        while tokio::time::Instant::now() < deadline && !seen.iter().any(|p| p.ends_with("a.rs")) {
+            attempt += 1;
+            let _ = std::fs::write(root.join("src/a.rs"), format!("// {attempt}\n"));
+            match tokio::time::timeout(Duration::from_millis(500), rx.recv()).await {
+                Ok(Some(batch)) => seen.extend(batch),
+                Ok(None) => {
+                    let _ = std::fs::remove_dir_all(&root);
+                    panic!("the watch channel closed: the guard was dropped with the scope");
+                }
+                Err(_) => {}
+            }
+        }
         let _ = std::fs::remove_dir_all(&root);
-
-        let paths = got
-            .expect("no event: the OS watch was dropped")
-            .expect("channel closed");
-        assert!(paths.iter().any(|p| p.ends_with("a.rs")), "{paths:?}");
+        assert!(
+            seen.iter().any(|p| p.ends_with("a.rs")),
+            "no event within the deadline; saw {seen:?}"
+        );
     }
 }
 
