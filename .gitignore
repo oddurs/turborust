@@ -1,2 +1,5 @@
 /target
 .turborust/
+
+# Written by scripts/agent into a worktree; never part of the tree.
+.agent-refs

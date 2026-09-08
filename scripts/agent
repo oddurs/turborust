@@ -29,11 +29,15 @@ say()  { printf '\033[1m%s\033[0m\n' "$*"; }
 warn() { printf '\033[33m%s\033[0m\n' "$*" >&2; }
 die()  { printf '\n\033[31m%s\033[0m\n\n' "$*" >&2; exit 1; }
 
+# `sed -E` deliberately: BSD sed has no `\+` in basic regex, so the portable
+# form silently passes the string through unchanged — which produces a branch
+# name with spaces in it and a confusing failure from git rather than from here.
 slugify() {
     printf '%s' "$1" \
         | tr '[:upper:]' '[:lower:]' \
-        | sed -e 's/[^a-z0-9]\+/-/g' -e 's/^-//' -e 's/-$//' \
-        | cut -c1-48 | sed 's/-$//'
+        | sed -E -e 's/[^a-z0-9]+/-/g' -e 's/^-+//' -e 's/-+$//' \
+        | cut -c1-48 \
+        | sed -E 's/-+$//'
 }
 
 # Tracker types map onto commit types; anything unknown is a chore.
@@ -108,6 +112,9 @@ cmd_commit() {
     [ -f .agent-refs ] && refs=$(cat .agent-refs)
 
     git add -A
+    # Never stage the script's own bookkeeping, even if the repository has not
+    # yet learned to ignore it.
+    git reset --quiet -- .agent-refs 2>/dev/null || true
     git diff --cached --quiet && die "nothing staged"
 
     # The Refs trailer is added here rather than typed each time, so it is never
