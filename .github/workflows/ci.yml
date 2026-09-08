@@ -64,8 +64,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo install cairn --locked || true
-      # A roadmap that has drifted from the items is the rot cairn exists to
+      # Not every checkout can install the tracker; when it cannot, say so and
+      # move on rather than failing a build for a reason unrelated to the code.
+      - name: install cairn
+        id: cairn
+        continue-on-error: true
+        run: cargo install cairn --locked
+      # A roadmap that has drifted from its items is the rot cairn exists to
       # prevent, so the check belongs in CI rather than in discipline.
-      - run: cairn check
-      - run: cairn render && git diff --exit-code ROADMAP.md
+      - name: roadmap validates and is up to date
+        if: steps.cairn.outcome == 'success'
+        run: |
+          cairn check
+          cairn render
+          git diff --exit-code ROADMAP.md
+      - name: skipped
+        if: steps.cairn.outcome != 'success'
+        run: echo "::notice::cairn unavailable; roadmap check skipped"

@@ -711,6 +711,9 @@ mod detach_tests {
 mod path_tests {
     use super::*;
 
+    // Path length is a `sockaddr_un` constraint; Windows named pipes have their
+    // own namespace and no such limit, so the constant does not exist there.
+    #[cfg(unix)]
     #[test]
     fn a_deeply_nested_workspace_still_gets_a_usable_socket() {
         // The path that exposed this: a session scratch directory nested six
