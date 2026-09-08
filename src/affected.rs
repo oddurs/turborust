@@ -42,18 +42,40 @@ pub fn changed_paths(root: &Path, base: &str) -> Result<BTreeSet<String>> {
 }
 
 fn in_worktree(root: &Path) -> bool {
-    Command::new("git")
+    git_command(root)
         .args(["rev-parse", "--is-inside-work-tree"])
-        .current_dir(root)
         .output()
         .map(|o| o.status.success())
         .unwrap_or(false)
 }
 
+/// A git invocation that answers about `root` and nothing else.
+///
+/// The environment variables matter more than the working directory. Git sets
+/// `GIT_DIR` for every hook it runs, and a `git` child inherits it — so a plain
+/// `current_dir(root)` still reports on the *hook's* repository, whatever
+/// directory it was pointed at. Anything invoked from a hook, or from another
+/// tool that exported these, would silently answer about the wrong repository.
+fn git_command(root: &Path) -> Command {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(root);
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_PREFIX",
+    ] {
+        cmd.env_remove(var);
+    }
+    cmd
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<Vec<String>> {
-    let out = Command::new("git")
+    let out = git_command(root)
         .args(args)
-        .current_dir(root)
         .output()
         .context("running git (is it installed?)")?;
     if !out.status.success() {
@@ -181,6 +203,27 @@ mod tests {
     fn global_paths_are_recognised() {
         assert!(is_global("Cargo.lock"));
         assert!(!is_global("crates/api/Cargo.toml"));
+    }
+
+    /// Git exports `GIT_DIR` to every hook it runs. Without clearing it, this
+    /// reports on whatever repository invoked the hook rather than on the
+    /// directory it was given — which is how a `--affected` run inside a
+    /// pre-push hook would quietly select the wrong thing.
+    #[test]
+    fn an_inherited_git_dir_does_not_leak_in() {
+        let dir = std::env::temp_dir().join(format!("tr-gitdir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let out = git_command(&dir)
+            .args(["rev-parse", "--is-inside-work-tree"])
+            .env("GIT_DIR", "/definitely/not/here/.git")
+            .output()
+            .unwrap();
+        // The bogus GIT_DIR we just set must be removed, and the directory is
+        // not a repository, so this fails rather than answering about elsewhere.
+        assert!(!out.status.success(), "an inherited GIT_DIR leaked through");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

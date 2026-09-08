@@ -1,3 +1,15 @@
+//! Unix only, deliberately.
+//!
+//! Every fixture here is a POSIX shell snippet — `cp`, `touch`, `true`,
+//! `trap ... TERM` — and turborust spawns through `cmd /C` on Windows, where
+//! none of those exist and `trap` has no equivalent at all. Rewriting them in
+//! cmd would be a second test suite, and the shutdown-order test could not be
+//! expressed in it.
+//!
+//! The real fix is a configurable shell (`shell = "bash"`), which would make
+//! these portable and is worth having on its own merits. Tracked in 0062.
+#![cfg(unix)]
+
 //! The one-shot `turborust run` path.
 //!
 //! Regression cover for cairn 0004: `run` used to filter the resolved plan down
@@ -176,12 +188,21 @@ async fn a_service_that_dies_fails_the_run_instead_of_hanging() {
     let sb = Sandbox::new("dead-svc");
     // Without the guard in `await_tasks`, `waits` never becomes ready and the run
     // would block until the harness timeout.
+    //
+    // `db` declares a readiness probe it can never satisfy, and that is
+    // load-bearing rather than decoration. A service with no probe is marked
+    // healthy the instant it spawns, so under load a dependent can start and
+    // finish in the window before `exit 1` is observed — the run then succeeds
+    // and the test fails intermittently. Which is precisely the "the process
+    // exists" versus "the process is ready" distinction this project is built
+    // around, showing up in its own suite.
     let (code, _) = run(
         &sb,
         r#"
         [services.db]
         cmd = "exit 1"
         restart = "never"
+        health = { log = "listening", interval = "30ms" }
 
         [tasks.waits]
         depends_on = ["db"]
@@ -191,6 +212,10 @@ async fn a_service_that_dies_fails_the_run_instead_of_hanging() {
     )
     .await;
     assert_ne!(code, 0, "a dead dependency must fail the run");
+    assert!(
+        !sb.path("waits-ran").exists(),
+        "the dependent must not run when its dependency never became ready"
+    );
 }
 
 // ---------------------------------------------------------------- cache ----

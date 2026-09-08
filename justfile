@@ -33,5 +33,7 @@ test:
     cargo test
 
 # Compile-check the Windows target from a host without an MSVC assembler.
+# --all-targets matters: without it the tests are never cross-checked, and a
+# unix-only constant referenced from a test compiles here and fails on CI.
 check-windows:
-    cargo check --target x86_64-pc-windows-msvc --features portable-hash
+    cargo check --all-targets --target x86_64-pc-windows-msvc --features portable-hash

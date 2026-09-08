@@ -86,6 +86,13 @@ Hooks live in `.githooks/` and are committed, so a fresh clone gets them:
 git config core.hooksPath .githooks
 ```
 
+## Cross-platform checks
+
+`just check-windows` compile-checks the Windows target from macOS or Linux. It
+passes `--all-targets` deliberately — without that the test code is not
+cross-checked, and a `#[cfg(unix)]` constant referenced from a test will compile
+locally and fail on CI.
+
 ## Attribution
 
 Nothing in this repository — commit, PR, comment, changelog, or code — attributes

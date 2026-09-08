@@ -1,3 +1,15 @@
+//! Unix only, deliberately.
+//!
+//! Every fixture here is a POSIX shell snippet — `cp`, `touch`, `true`,
+//! `trap ... TERM` — and turborust spawns through `cmd /C` on Windows, where
+//! none of those exist and `trap` has no equivalent at all. Rewriting them in
+//! cmd would be a second test suite, and the shutdown-order test could not be
+//! expressed in it.
+//!
+//! The real fix is a configurable shell (`shell = "bash"`), which would make
+//! these portable and is worth having on its own merits. Tracked in 0062.
+#![cfg(unix)]
+
 //! Integration harness for the supervision tree (cairn 0006).
 //!
 //! The supervisor is the most intricate part of the project and, until this
