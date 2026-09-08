@@ -70,6 +70,8 @@ cairn render                      # regenerate ROADMAP.md
 **Never commit to `main`.** Use `scripts/agent`, which is the whole workflow:
 
 ```
+scripts/setup                install hooks and the commit template (once, per clone)
+scripts/agent new <type> "…" file a tracker item and branch for it in one step
 scripts/agent start <id>     worktree + branch + claim the item
 scripts/agent check          formatter, linter, tests, roadmap
 scripts/agent commit "<msg>" conventional commit with a Refs trailer
@@ -79,6 +81,9 @@ scripts/agent clean          remove worktrees whose branch has merged
 
 Worktrees, not branch switching: several agents work here at once, and two of
 them sharing a checkout will collide over the index or `target/`.
+
+`agent new` exists so filing an item never requires a commit on `main` — without
+it, the workflow's first rule has to be broken in order to follow it.
 
 Hooks in `.githooks/` reject unformatted code, non-conventional subjects, clippy
 warnings, failing tests — and any attribution to a tool or model, which this

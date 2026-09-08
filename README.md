@@ -1,5 +1,8 @@
 # turborust
 
+[![CI](https://github.com/oddurs/turborust/actions/workflows/ci.yml/badge.svg)](https://github.com/oddurs/turborust/actions/workflows/ci.yml)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue)](#licence)
+
 A dev orchestrator for full-Rust stacks. One binary, one config file: it supervises
 your services, watches the right files, caches your builds, and tells you exactly
 why anything re-ran.
@@ -350,6 +353,16 @@ own right, not a feature.
   spawns through `cmd /C` there; a configurable shell would fix that half (`0062`).
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
+
+## Contributing
+
+```sh
+scripts/setup     # hooks, commit template, tooling check
+cargo test
+```
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). `main` only advances through a pull
+request, and `scripts/agent` drives the whole loop.
 
 ## Demo
 

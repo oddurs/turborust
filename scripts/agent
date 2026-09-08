@@ -10,6 +10,7 @@
 #
 #   scripts/agent start 0041        take a tracker item: worktree, branch, claim
 #   scripts/agent start feat "add X"  or start freehand
+#   scripts/agent new bug "title"   file a tracker item AND branch for it
 #   scripts/agent check             formatter, linter, tests, roadmap
 #   scripts/agent commit "msg"      conventional commit with a Refs trailer
 #   scripts/agent pr                push and open a pull request
@@ -52,13 +53,25 @@ tracker_type_to_prefix() {
 
 has_cairn() { command -v cairn >/dev/null 2>&1 && [ -f "$repo_root/cairn.toml" ]; }
 
+# The hooks are local git config, so a fresh clone has none of them. Working
+# silently without them is how someone discovers on their first PR that nothing
+# was being checked.
+warn_if_unconfigured() {
+    [ "$(git -C "$repo_root" config --get core.hooksPath || true)" = ".githooks" ] && return 0
+    warn "  hooks are not installed; run scripts/setup"
+}
+
 cmd_start() {
+    warn_if_unconfigured
     [ $# -ge 1 ] || die "usage: agent start <tracker-id> | agent start <type> \"<title>\""
 
     local prefix slug refs=""
     if [[ "$1" =~ ^[0-9]+$ ]] && has_cairn; then
         local id json title type
-        id=$(printf '%04d' "$1")
+        # `10#` is load-bearing: printf reads a leading zero as octal, so a
+        # zero-padded id like 0063 becomes 51 and silently opens a different
+        # item. Tracker ids are exactly the shape that triggers it.
+        id=$(printf '%04d' "$((10#$1))")
         json=$(cd "$repo_root" && cairn show "$1" --json 2>/dev/null) \
             || die "no tracker item $id"
         title=$(printf '%s' "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["title"])')
@@ -96,6 +109,42 @@ cmd_start() {
     printf '\n  cd %s\n\n' "$dir"
 }
 
+# Files a tracker item and immediately branches for it.
+#
+# Without this, filing an item is a commit — and at that moment the only branch
+# that exists is the default one, so the workflow's first rule has to be broken
+# in order to follow it. Here the item lands on the branch that implements it.
+cmd_new() {
+    [ $# -ge 2 ] || die 'usage: agent new <type> "<title>" — type: bug feature chore docs'
+    has_cairn || die "no tracker here; use: agent start <type> \"<title>\""
+    local type="$1"; shift
+    local title="$*"
+
+    local id
+    id=$(cd "$repo_root" && CAIRN_NO_HOOKS=1 cairn new "$title" -t "$type" -q) \
+        || die "could not create the item"
+
+    # The item file is untracked in the primary checkout at this point. Move it
+    # to the new worktree and put the primary checkout back exactly as it was —
+    # no stash, nothing to unwind if this is interrupted.
+    local item
+    item=$(cd "$repo_root" && ls cairn/items/${id}-*.md 2>/dev/null | head -1)
+
+    cmd_start "$id"
+
+    local dir
+    dir=$(git -C "$repo_root" worktree list --porcelain \
+          | awk -v b="$(tracker_type_to_prefix "$type")/$id-$(slugify "$title")" \
+                '/^worktree /{d=$2} /^branch /{if ($2 == "refs/heads/" b) print d}')
+    if [ -n "$item" ] && [ -n "$dir" ] && [ -d "$dir" ]; then
+        mkdir -p "$dir/cairn/items"
+        mv "$repo_root/$item" "$dir/$item"
+        (cd "$repo_root" && git checkout --quiet -- ROADMAP.md 2>/dev/null) || true
+        (cd "$dir" && CAIRN_NO_HOOKS=1 cairn render -q >/dev/null 2>&1) || true
+        dim "  $item moved onto the branch"
+    fi
+}
+
 cmd_check() {
     say "checking"
     dim "  formatting"; cargo fmt --check || die "run: cargo fmt"
@@ -115,6 +164,7 @@ cmd_check() {
 }
 
 cmd_commit() {
+    warn_if_unconfigured
     [ $# -ge 1 ] || die 'usage: agent commit "<type>(<scope>): <summary>"'
     local msg="$1"
     local refs=""
@@ -223,6 +273,7 @@ cmd_clean() {
 }
 
 case "${1:-}" in
+    new)    shift; cmd_new "$@" ;;
     start)  shift; cmd_start "$@" ;;
     check)  shift; cmd_check ;;
     commit) shift; cmd_commit "$@" ;;

@@ -2,6 +2,18 @@
 default:
     @just --list
 
+# Install hooks and the commit template. Run once per clone.
+setup:
+    @scripts/setup
+
+# Report what setup would do, without changing anything.
+setup-check:
+    @scripts/setup --check
+
+# Regenerate the committed JSON schema for turborust.toml.
+schema:
+    cargo run --quiet -- schema > turborust.schema.json
+
 # Formatter, linter, tests, roadmap — the same gate CI runs.
 check:
     @scripts/agent check

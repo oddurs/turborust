@@ -85,9 +85,13 @@ Enough to dogfood in a real project.
 
 ## v1.1 — Someone else can use it
 
-`##########` 100% · 4 of 4 done · due 2027-05-01
+`########··` 80% · 4 of 5 done · due 2027-05-01
 
 The gaps that are not polish, but holes in what is already claimed.
+
+### in progress
+
+- [ ] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
 ### done
 
