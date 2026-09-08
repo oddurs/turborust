@@ -177,17 +177,40 @@ cmd_list() {
     done
 }
 
+# True when a branch's work has landed on the default branch.
+#
+# Two cases, because a merge commit and a squash merge look nothing alike: after
+# a squash the branch's commits are ancestors of nothing, so the ancestor test
+# alone quietly leaves every squash-merged worktree behind — and squash is the
+# default merge strategy, so that would be most of them.
+branch_has_landed() {
+    local branch="$1"
+    git merge-base --is-ancestor "$branch" "$default_branch" 2>/dev/null && return 0
+    # A vanished upstream means the remote branch was deleted, which is what a
+    # merge with --delete-branch does.
+    if ! git rev-parse --verify --quiet "refs/remotes/origin/$branch" >/dev/null; then
+        git config --get "branch.$branch.remote" >/dev/null 2>&1 && return 0
+    fi
+    # Otherwise ask the forge. From git alone, a squash-merged branch whose
+    # remote still exists is indistinguishable from an unmerged one.
+    command -v gh >/dev/null 2>&1 || return 1
+    [ "$(gh pr view "$branch" --json state -q .state 2>/dev/null)" = "MERGED" ]
+}
+
 cmd_clean() {
+    git fetch --prune --quiet origin 2>/dev/null || true
     local removed=0
     while read -r dir _ branch; do
         branch=${branch//[\[\]]/}
         [ "$dir" = "$repo_root" ] && continue
-        # Merged into the default branch means the work has landed and the
-        # worktree is now just a stale copy.
-        if git merge-base --is-ancestor "$branch" "$default_branch" 2>/dev/null; then
+        if branch_has_landed "$branch"; then
             dim "  removing $branch"
+            # Worktree first: git refuses to delete a branch a worktree holds,
+            # which is also why `gh pr merge --delete-branch` cannot tidy up on
+            # its own. This command owns the whole teardown instead.
             git worktree remove "$dir" --force
-            git branch -d "$branch" >/dev/null 2>&1 || true
+            git branch -D "$branch" >/dev/null 2>&1 || true
+            git push --quiet origin --delete "$branch" >/dev/null 2>&1 || true
             removed=$((removed + 1))
         fi
     done < <(git worktree list)
