@@ -100,7 +100,16 @@ cmd_check() {
     say "checking"
     dim "  formatting"; cargo fmt --check || die "run: cargo fmt"
     dim "  lints";      cargo clippy --all-targets --quiet -- -D warnings
-    dim "  tests";      cargo test --quiet 2>&1 | grep -E '^test result:' | sed 's/^/    /'
+    dim "  tests"
+    # Captured rather than piped: a pipeline hides which test failed, and "1
+    # failed" without a name is the least useful thing a check can say.
+    local out
+    if ! out=$(cargo test --quiet 2>&1); then
+        printf '%s\n' "$out" | grep -E '^test result:|^test .*FAILED' | sed 's/^/    /'
+        printf '%s\n' "$out" | grep -A4 '^---- ' | head -12 | sed 's/^/    /'
+        die "tests are failing"
+    fi
+    printf '%s\n' "$out" | grep -E '^test result:' | sed 's/^/    /'
     if has_cairn; then dim "  roadmap"; cairn check | sed 's/^/    /'; fi
     say "green"
 }
