@@ -509,6 +509,29 @@ pub fn strip_ansi(s: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Children run through the platform shell, so test fixtures have to be
+    /// written in it. `cmd.exe` separates commands with `&`, not `;`, and has no
+    /// `sleep` — skipping these on Windows would leave the job-object teardown,
+    /// the one piece of platform-specific process code here, untested.
+    fn echo_then_exit(word: &str, code: i32) -> String {
+        if cfg!(windows) {
+            format!("echo {word} & exit {code}")
+        } else {
+            format!("echo {word}; exit {code}")
+        }
+    }
+
+    /// Announces itself, then stays alive until it is stopped.
+    fn announce_then_wait(word: &str) -> String {
+        if cfg!(windows) {
+            // `ping` rather than `timeout`, which refuses to run when its input
+            // is redirected — which it is, under a pty.
+            format!("echo {word} & ping -n 301 127.0.0.1 > nul")
+        } else {
+            format!("echo {word}; sleep 300")
+        }
+    }
+
     #[test]
     fn strips_color_codes() {
         assert_eq!(strip_ansi("\u{1b}[32mok\u{1b}[0m"), "ok");
@@ -521,7 +544,7 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let h = spawn(
             "t",
-            "echo hello; exit 3",
+            &echo_then_exit("hello", 3),
             Path::new("."),
             &Default::default(),
             tx,
@@ -559,7 +582,7 @@ mod tests {
         // after spawn races the fork under load and flakes.
         let h = spawn(
             "t",
-            "echo ready; sleep 300",
+            &announce_then_wait("ready"),
             Path::new("."),
             &Default::default(),
             tx,
