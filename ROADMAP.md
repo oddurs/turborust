@@ -131,9 +131,13 @@ Documented, tested, and safe to depend on.
 
 ## later — Not now, not never
 
-`##########` 100% · 8 of 8 done
+`#########·` 89% · 8 of 9 done
 
 Good ideas without a date yet.
+
+### backlog
+
+- [ ] `0061` Dynamic completion for node names <sup>feature · p3</sup>
 
 ### done
 
