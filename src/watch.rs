@@ -228,11 +228,13 @@ mod tests {
         let mut w = watch(&root, Duration::from_millis(50)).unwrap();
         // Give the OS watcher a moment to arm before touching the tree.
         tokio::time::sleep(Duration::from_millis(300)).await;
-        std::fs::write(root.join("src/a.rs"), "fn main() {}").unwrap();
-        let got = tokio::time::timeout(Duration::from_secs(10), w.recv()).await;
+
+        let seen = write_until_seen(&mut w, &root, "src/a.rs").await;
         let _ = std::fs::remove_dir_all(&root);
-        let paths = got.expect("watcher timed out").expect("watcher closed");
-        assert!(paths.iter().any(|p| p.ends_with("a.rs")), "{paths:?}");
+        assert!(
+            seen.iter().any(|p| p.ends_with("a.rs")),
+            "no event within the deadline; saw {seen:?}"
+        );
     }
 }
 
