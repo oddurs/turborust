@@ -11,30 +11,56 @@ description: "One binary that supervises your services, watches the right files,
     <div class="cta">
       <a class="btn btn-primary" href="/docs.html">Read the docs</a>
       <a class="btn btn-ghost" href="https://github.com/oddurs/turborust">GitHub</a>
-      <button class="install" data-copy="cargo install turborust" title="Copy">
-        <b>$</b> cargo install turborust <span class="copy-label quiet">copy</span>
+      <button class="install" data-copy="cargo install turborust" aria-label="Copy install command">
+        <span class="prompt" aria-hidden="true">$</span>
+        <span class="cmd">cargo install turborust</span>
+        <span class="copy" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="12" height="12" rx="2.5"/><path d="M6 15H4.5A1.5 1.5 0 0 1 3 13.5v-9A1.5 1.5 0 0 1 4.5 3h9A1.5 1.5 0 0 1 15 4.5V6"/></svg></span>
       </button>
     </div>
   </div>
 
-  <div class="tide-wrap">
-    <div class="crab-stage" aria-hidden="true">
-      <svg viewBox="0 0 200 120">
-        <path class="crab-line" d="M46 62 Q22 52 26 30 Q28 18 40 20"/>
-        <path class="crab-line" d="M154 62 Q178 52 174 30 Q172 18 160 20"/>
-        <path class="crab-line" d="M60 88 47 108M78 94 70 114M122 94 130 114M140 88 153 108"/>
-        <ellipse class="crab-body" cx="100" cy="72" rx="46" ry="30"/>
-        <ellipse class="crab-shine" cx="86" cy="60" rx="16" ry="8"/>
-        <circle class="crab-body" cx="34" cy="22" r="11"/>
-        <circle class="crab-body" cx="166" cy="22" r="11"/>
-        <circle class="crab-eye-white" cx="84" cy="62" r="9"/>
-        <circle class="crab-eye-white" cx="116" cy="62" r="9"/>
-        <circle class="crab-pupil" cx="84" cy="62" r="4"/>
-        <circle class="crab-pupil" cx="116" cy="62" r="4"/>
-      </svg>
-    </div>
-    <canvas id="tide" aria-hidden="true"></canvas>
+ <div class="tideline">
+  <canvas id="tide" aria-hidden="true"></canvas>
+  <div class="crab-stage" aria-hidden="true">
+   <svg class="crab" viewBox="0 0 380 200">
+   <defs>
+   <g id="claw">
+   <ellipse stroke="none" cx="22" cy="-12" rx="25" ry="17" transform="rotate(-12 22 -12)"/>
+   <path stroke="none" d="M34 -14C50 -12 66 -10 74 -7C78 -5.5 78 -1.5 74 0C62 3 44 2 32 -1Z"/>
+   <path stroke="none" d="M32 -20C48 -24 64 -30 73 -34C77 -36 80 -31 77 -28C69 -21 50 -13 36 -11Z"/>
+   </g>
+   <g id="crab-back">
+   <path fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M274 100 L306 100 L316 112"/>
+   <path fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M274 113 L300 126 L304 144"/>
+   <path fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M258 126 L276 144 L274 162"/>
+   <path fill="none" stroke-width="7" stroke-linecap="round" stroke-linejoin="round" d="M234 134 L244 154 L238 170"/>
+   <path fill="none" stroke-width="11" stroke-linecap="round" d="M252 80C272 74 280 68 284 60"/>
+   </g>
+   <g id="crab-front"><use href="#claw" transform="translate(276 62) rotate(-18) scale(.92)"/></g>
+   <clipPath id="shell-clip"><path d="M146 72C168 65 212 65 234 72L262 84Q276 90 277 101Q277 112 262 122L236 134Q190 142 144 134L118 122Q103 112 103 101Q104 90 118 84Z"/></clipPath>
+   </defs>
+   <ellipse class="cast" cx="190" cy="178" rx="82" ry="6.5"/>
+   <use href="#crab-back"/>
+   <use href="#crab-back" transform="translate(380 0) scale(-1 1)"/>
+   <path fill="none" stroke-width="6" stroke-linecap="round" d="M168 74 L166 58"/>
+   <path fill="none" stroke-width="6" stroke-linecap="round" d="M212 74 L214 58"/>
+   <path stroke="none" d="M146 72C168 65 212 65 234 72L262 84Q276 90 277 101Q277 112 262 122L236 134Q190 142 144 134L118 122Q103 112 103 101Q104 90 118 84Z"/>
+   <g clip-path="url(#shell-clip)">
+   <path class="under" d="M100 106C140 136 240 136 280 106L280 152L100 152Z"/>
+   <path class="ridge" d="M130 116C160 128 220 128 250 116"/>
+   </g>
+   <circle class="eye" cx="166" cy="54" r="9.5"/>
+   <circle class="eye" cx="214" cy="54" r="9.5"/>
+   <circle class="pupil" cx="166" cy="54" r="4.2"/>
+   <circle class="pupil" cx="214" cy="54" r="4.2"/>
+   <circle class="spark" cx="163" cy="51" r="1.9"/>
+   <circle class="spark" cx="211" cy="51" r="1.9"/>
+   <use href="#crab-front"/>
+   <use href="#crab-front" transform="translate(380 0) scale(-1 1)"/>
+   </svg>
   </div>
+ </div>
+
 </section>
 
 <svg class="tide-edge" viewBox="0 0 1440 54" preserveAspectRatio="none" aria-hidden="true"><path d="M0 30 C 120 6, 240 6, 360 24 C 480 42, 600 48, 720 34 C 840 20, 960 4, 1080 14 C 1200 24, 1320 44, 1440 32 L1440 54 L0 54 Z"/></svg>

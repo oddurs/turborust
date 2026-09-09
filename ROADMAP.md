@@ -157,9 +157,13 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`··········` 0% · 0 of 1 done
+`#####·····` 50% · 1 of 2 done
 
 ### backlog
 
 - [ ] `0064` a site for turborust, built by turborust <sup>feature · p2</sup>
+
+### done
+
+- [x] `0065` site: redraw illustrations, new type system, fix layout bugs <sup>bug · p2</sup>
 
