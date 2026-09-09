@@ -6,7 +6,7 @@
 //! this example exists to show: a Rust build step with declared inputs and
 //! outputs, so turborust can cache it and explain it.
 
-use pulldown_cmark::{Options, Parser, html};
+use pulldown_cmark::{html, Options, Parser};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -50,11 +50,35 @@ fn render(path: &Path, dist: &Path) -> Result<String, Box<dyn std::error::Error>
     options.insert(Options::ENABLE_SMART_PUNCTUATION);
     let mut content = String::new();
     html::push_html(&mut content, Parser::new_ext(&body, options));
+    let content = unwrap_block_svgs(&content);
 
     let page = template(&title, &description, &slug, &content);
-    let name = if slug == "index" { "index.html".to_string() } else { format!("{slug}.html") };
+    let name = if slug == "index" {
+        "index.html".to_string()
+    } else {
+        format!("{slug}.html")
+    };
     fs::write(dist.join(&name), page)?;
     Ok(name)
+}
+
+/// Unwraps a paragraph that holds nothing but one SVG.
+///
+/// `pulldown-cmark` has no idea what `svg` is, so a divider on its own line is
+/// inline content and comes back wrapped in a `<p>`. That paragraph then
+/// inherits the prose measure, and a full-bleed wave silently ends at 64ch.
+fn unwrap_block_svgs(html: &str) -> String {
+    let mut out = String::with_capacity(html.len());
+    for line in html.lines() {
+        let trimmed = line.trim();
+        let unwrapped = trimmed
+            .strip_prefix("<p><svg")
+            .and_then(|rest| rest.strip_suffix("</svg></p>"))
+            .map(|inner| format!("<svg{inner}</svg>"));
+        out.push_str(unwrapped.as_deref().unwrap_or(line));
+        out.push('\n');
+    }
+    out
 }
 
 /// Splits a leading `---` delimited block from the body.
@@ -76,8 +100,16 @@ fn front_value(front: &str, key: &str) -> Option<String> {
 }
 
 fn template(title: &str, description: &str, slug: &str, content: &str) -> String {
-    let nav_docs = if slug == "docs" { " aria-current=\"page\"" } else { "" };
-    let nav_home = if slug == "index" { " aria-current=\"page\"" } else { "" };
+    let nav_docs = if slug == "docs" {
+        " aria-current=\"page\""
+    } else {
+        ""
+    };
+    let nav_home = if slug == "index" {
+        " aria-current=\"page\""
+    } else {
+        ""
+    };
     format!(
         r##"<!doctype html>
 <html lang="en">
@@ -89,7 +121,7 @@ fn template(title: &str, description: &str, slug: &str, content: &str) -> String
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🦀</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wdth,wght@12..96,75..100,400..800&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wdth,wght@62..125,400..800&family=Source+Sans+3:wght@300..700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <link rel="stylesheet" href="/site.css">
 </head>
 <body>
@@ -120,12 +152,22 @@ fn template(title: &str, description: &str, slug: &str, content: &str) -> String
 
 /// A small crab, drawn rather than an emoji: it has to sit on a baseline next to
 /// text and take the accent colour, and an emoji does neither.
-const CRAB_MARK: &str = r#"<svg viewBox="0 0 24 20" width="22" height="18" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
-<path d="M4 9 Q2 6 3.5 4"/><path d="M20 9 Q22 6 20.5 4"/>
-<ellipse cx="12" cy="11" rx="6.5" ry="4.6" fill="currentColor" stroke="none"/>
-<path d="M5.6 13.5 3 16M18.4 13.5 21 16M7 15 6 17.6M17 15 18 17.6"/>
-<circle cx="9.8" cy="8.4" r="1.15" fill="var(--shell)" stroke="none"/>
-<circle cx="14.2" cy="8.4" r="1.15" fill="var(--shell)" stroke="none"/>
+const CRAB_MARK: &str = r#"<svg viewBox="0 0 34 22" width="25" height="16" aria-hidden="true">
+<g fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+<g stroke-width="1.7">
+<path d="M24.6 14.4 27.2 15"/><path d="M23.2 16 25.2 17.8"/><path d="M20.4 16.8 21.6 19"/>
+<path d="M9.4 14.4 6.8 15"/><path d="M10.8 16 8.8 17.8"/><path d="M13.6 16.8 12.4 19"/>
+</g>
+<g stroke-width="2.1"><path d="M24.2 10.4 27.2 8"/><path d="M9.8 10.4 6.8 8"/></g>
+<g stroke-width="1.8">
+<path d="M27.2 8 30.2 7.4"/><path d="M27.2 8 28.8 4.8"/>
+<path d="M6.8 8 3.8 7.4"/><path d="M6.8 8 5.2 4.8"/>
+</g>
+</g>
+<path fill="currentColor" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"
+ d="M11.6 9.4 22.4 9.4 25.4 11.6 24.6 14.4 21.2 16 12.8 16 9.4 14.4 8.6 11.6Z"/>
+<circle class="eye" cx="14.6" cy="11.6" r=".85"/>
+<circle class="eye" cx="19.4" cy="11.6" r=".85"/>
 </svg>"#;
 
 /// Copies a directory tree, creating the destination as needed.
