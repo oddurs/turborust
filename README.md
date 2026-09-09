@@ -354,6 +354,18 @@ own right, not a feature.
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
 
+## The site
+
+`site/` is turborust's own homepage: a small Rust generator that renders
+Markdown, orchestrated and served by turborust itself.
+
+```sh
+turborust up          # builds site/dist and serves it on :8790
+```
+
+A cached build task feeding a serve node — editing a page rebuilds and reloads,
+editing only the stylesheet swaps it in place and keeps your scroll position.
+
 ## Contributing
 
 ```sh
