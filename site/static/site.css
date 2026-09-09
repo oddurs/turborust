@@ -1,0 +1,366 @@
+/* turborust — low tide.
+ *
+ * The organising idea is the tide line: the irregular boundary where water meets
+ * sand, which is the one thing every beach actually looks like. Sections are
+ * divided by tide edges rather than rules, and the palette is a beach at low
+ * tide — warm neutrals biased toward the crab so the accent reads as native
+ * rather than applied, with a shallow-water teal so the orange is not carrying
+ * the whole page alone.
+ */
+
+:root {
+  --sand: #f4ede1;
+  --shell: #fffdf8;
+  --wet: #e3d5c1;
+  --line: #d8c8b2;
+  --ink: #2a211a;
+  --dim: #7a6a5a;
+  --faint: #a2917c;
+
+  --crab: #e8532a;
+  --claw: #c43a16;
+  --tide: #2e8c8c;
+  --deep: #1f6b6b;
+
+  --display: "Bricolage Grotesque", ui-sans-serif, system-ui, sans-serif;
+  --body: "Instrument Sans", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --measure: 62ch;
+  --page: 1040px;
+  color-scheme: light;
+}
+
+/* Night beach. Redefined at token level only, so every component below works
+   unchanged in both. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --sand: #12100e;
+    --shell: #1c1815;
+    --wet: #241f1a;
+    --line: #362e26;
+    --ink: #f5ede2;
+    --dim: #b6a591;
+    --faint: #7e6f5e;
+    --crab: #ff6a3d;
+    --claw: #ff8a63;
+    --tide: #4fb8b8;
+    --deep: #7fd4d4;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --sand: #12100e;
+  --shell: #1c1815;
+  --wet: #241f1a;
+  --line: #362e26;
+  --ink: #f5ede2;
+  --dim: #b6a591;
+  --faint: #7e6f5e;
+  --crab: #ff6a3d;
+  --claw: #ff8a63;
+  --tide: #4fb8b8;
+  --deep: #7fd4d4;
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--sand);
+  color: var(--ink);
+  font-family: var(--body);
+  font-size: 17px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+  overflow-x: hidden;
+}
+
+.skip {
+  position: absolute;
+  left: -999px;
+  top: 0;
+  background: var(--crab);
+  color: #fff;
+  padding: 10px 16px;
+  z-index: 100;
+}
+.skip:focus { left: 8px; top: 8px; }
+
+a { color: var(--claw); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--crab); }
+:focus-visible { outline: 2px solid var(--crab); outline-offset: 3px; border-radius: 3px; }
+
+/* ------------------------------------------------------------------- nav --- */
+
+.topbar {
+  max-width: var(--page);
+  margin: 0 auto;
+  padding: 20px 24px;
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  position: relative;
+  z-index: 3;
+}
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--display);
+  font-weight: 700;
+  font-size: 20px;
+  font-variation-settings: "wdth" 88;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+  text-decoration: none;
+}
+.wordmark-crab { color: var(--crab); display: inline-flex; }
+.topbar nav { margin-left: auto; display: flex; gap: 22px; }
+.topbar nav a {
+  color: var(--dim);
+  text-decoration: none;
+  font-size: 15px;
+  font-weight: 500;
+}
+.topbar nav a:hover,
+.topbar nav a[aria-current] { color: var(--ink); }
+
+/* ------------------------------------------------------------------ hero --- */
+
+.hero { position: relative; padding: 40px 24px 0; }
+.hero-inner { max-width: var(--page); margin: 0 auto; position: relative; z-index: 2; }
+
+.eyebrow {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--tide);
+  margin: 0 0 18px;
+}
+
+h1 {
+  font-family: var(--display);
+  /* The display face is variable: narrow and heavy at display sizes reads as
+     deliberate, where the default width reads as a default. */
+  font-variation-settings: "wdth" 82, "opsz" 72;
+  font-weight: 800;
+  font-size: clamp(44px, 8.5vw, 92px);
+  line-height: 0.94;
+  letter-spacing: -0.035em;
+  margin: 0 0 22px;
+  max-width: 15ch;
+  text-wrap: balance;
+}
+h1 em { font-style: normal; color: var(--crab); }
+
+.lede {
+  margin: 0 0 30px;
+  max-width: 54ch;
+  font-size: clamp(18px, 2.1vw, 21px);
+  color: var(--dim);
+}
+.lede strong { color: var(--ink); font-weight: 600; }
+
+.cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  padding: 12px 20px;
+  border-radius: 999px;
+  font-weight: 600;
+  font-size: 15.5px;
+  text-decoration: none;
+  transition: transform 140ms cubic-bezier(.2,.8,.3,1), background 140ms;
+}
+.btn-primary { background: var(--crab); color: #fff; }
+.btn-primary:hover { background: var(--claw); color: #fff; transform: translateY(-1px); }
+.btn-ghost { color: var(--ink); border: 1px solid var(--line); background: var(--shell); }
+.btn-ghost:hover { color: var(--ink); border-color: var(--faint); transform: translateY(-1px); }
+
+.install {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--dim);
+  background: var(--shell);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 15px;
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+}
+.install b { color: var(--faint); font-weight: 400; user-select: none; }
+
+/* The tide itself. Canvas rather than hand-authored paths: it moves, and the
+   foam line is generated per frame. */
+.tide-wrap { position: relative; margin-top: 56px; height: 260px; }
+#tide { display: block; width: 100%; height: 260px; }
+
+/* The crab sits at the waterline. */
+.crab-stage {
+  position: absolute;
+  left: 50%;
+  bottom: 54px;
+  transform: translateX(-50%);
+  width: 168px;
+  z-index: 2;
+  pointer-events: none;
+}
+.crab-stage svg { width: 100%; height: auto; display: block; }
+.crab-body { fill: var(--crab); }
+.crab-line { stroke: var(--claw); stroke-width: 3; stroke-linecap: round; fill: none; }
+.crab-eye-white { fill: var(--shell); }
+.crab-pupil { fill: var(--ink); transition: transform 90ms linear; }
+.crab-shine { fill: rgba(255,255,255,.35); }
+
+/* ------------------------------------------------------------- tide edge --- */
+
+/* Sections meet along a tide line rather than a rule. The band beneath is wet
+   sand, which is what makes the edge read as a waterline and not a decoration. */
+.tide-edge { display: block; width: 100%; height: 54px; }
+.tide-edge path { fill: var(--wet); }
+.band { background: var(--wet); }
+.band-out { display: block; width: 100%; height: 54px; transform: rotate(180deg); }
+.band-out path { fill: var(--wet); }
+
+/* --------------------------------------------------------------- content --- */
+
+main { position: relative; z-index: 1; }
+section { padding: 8px 24px 64px; }
+.wrap { max-width: var(--page); margin: 0 auto; }
+.narrow { max-width: var(--measure); }
+
+h2 {
+  font-family: var(--display);
+  font-variation-settings: "wdth" 88;
+  font-weight: 700;
+  font-size: clamp(28px, 4vw, 40px);
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  margin: 0 0 14px;
+  text-wrap: balance;
+}
+h3 {
+  font-family: var(--display);
+  font-variation-settings: "wdth" 92;
+  font-weight: 600;
+  font-size: 19px;
+  letter-spacing: -0.01em;
+  margin: 0 0 7px;
+}
+p { margin: 0 0 18px; max-width: var(--measure); }
+.section-lede { color: var(--dim); max-width: 56ch; margin-bottom: 34px; }
+
+/* Pebbles: asymmetric radii, because nothing on a beach is a rounded rectangle. */
+.pebbles { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
+@media (max-width: 860px) { .pebbles { grid-template-columns: 1fr; } }
+.pebble {
+  background: var(--shell);
+  border: 1px solid var(--line);
+  border-radius: 28px 34px 26px 32px;
+  padding: 26px 24px;
+}
+.pebble:nth-child(2) { border-radius: 32px 26px 34px 28px; }
+.pebble:nth-child(3) { border-radius: 26px 32px 28px 34px; }
+.pebble p { color: var(--dim); font-size: 15.5px; margin: 0; }
+.pebble .mark {
+  color: var(--tide);
+  display: inline-flex;
+  margin-bottom: 14px;
+}
+
+/* Wet sand: code sits in a darker inset panel, like something the tide left. */
+pre {
+  margin: 0 0 20px;
+  padding: 20px 22px;
+  overflow-x: auto;
+  background: var(--wet);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  font-family: var(--mono);
+  font-size: 13.5px;
+  line-height: 1.7;
+  color: var(--ink);
+}
+code { font-family: var(--mono); font-size: 0.92em; }
+:not(pre) > code {
+  background: var(--wet);
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--claw);
+}
+pre code { background: none; padding: 0; color: inherit; }
+.c { color: var(--faint); }
+.k { color: var(--crab); }
+.s { color: var(--deep); }
+
+.split { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+@media (max-width: 860px) { .split { grid-template-columns: 1fr; gap: 24px; } }
+
+/* A numbered sequence, because these steps genuinely happen in order. */
+.steps { list-style: none; margin: 0; padding: 0; counter-reset: step; }
+.steps li {
+  counter-increment: step;
+  display: grid;
+  grid-template-columns: 34px 1fr;
+  gap: 16px;
+  padding: 14px 0;
+  border-top: 1px solid var(--line);
+}
+.steps li::before {
+  content: counter(step, decimal-leading-zero);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--tide);
+  padding-top: 4px;
+}
+.steps strong { font-weight: 600; }
+.steps span { color: var(--dim); font-size: 15.5px; display: block; }
+
+.quiet { color: var(--dim); font-size: 15px; }
+
+table { border-collapse: collapse; width: 100%; margin: 0 0 22px; font-size: 15px; }
+th, td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--faint); }
+td code { white-space: nowrap; }
+
+/* ----------------------------------------------------------------- docs --- */
+
+.doc-head { padding: 30px 24px 8px; }
+.doc-body { padding: 0 24px 80px; }
+.doc-body h2 { margin-top: 46px; }
+.doc-body h2:first-of-type { margin-top: 8px; }
+.doc-body ul { max-width: var(--measure); color: var(--dim); padding-left: 20px; }
+.doc-body li { margin-bottom: 7px; }
+.doc-body li strong { color: var(--ink); }
+
+footer {
+  border-top: 1px solid var(--line);
+  padding: 26px 24px 48px;
+  color: var(--faint);
+  font-size: 14px;
+}
+footer p { max-width: var(--page); margin: 0 auto; }
+
+/* Bubbles drift up rarely — ambient, not a light show. */
+.bubble {
+  position: fixed;
+  bottom: -20px;
+  border-radius: 50%;
+  border: 1.5px solid var(--tide);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .bubble { display: none; }
+}
