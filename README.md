@@ -52,6 +52,7 @@ turborust init              scaffold a config from your Cargo workspace
 turborust schema            JSON Schema for turborust.toml, for editor completion
 turborust completions <sh>  shell completion script
 turborust man               the man page
+turborust cache             what the cache is holding, and what it last dropped
 turborust clean             drop cached task results
 ```
 
@@ -331,11 +332,31 @@ undermines everything else here, so it comes before any new feature.
 [cache]
 shared = "~/team/turborust-cache"   # read results from here too
 push = false                        # …and contribute yours. Off by default.
+max_size = "10GiB"                  # local budget; "0" keeps everything
 ```
 
 Any directory both machines can see: a network mount, a synced folder, another
 checkout. A hit in the shared store is copied into the local one on the way past,
 so the round trip happens once.
+
+### What the local store keeps
+
+`max_size` is a byte budget, and results are dropped least-recently-**used**
+first — used meaning *read*, not written. Ordering by write time evicts the
+entry you hit forty times a day in favour of a one-off produced last night on a
+branch you have since deleted, which is backwards for the access pattern a cache
+exists to serve. A hit touches a zero-byte marker beside the record rather than
+rewriting the record, because a record carries one hash per input file and
+taxing every hit to speed up eviction is the wrong trade.
+
+`turborust cache` shows what is held, per task, and what the last eviction
+dropped — so a miss caused by a sweep can be explained rather than looking like
+the cache simply forgot.
+
+A **shared** store is never evicted from. It is not one machine's to
+garbage-collect: deleting from it would drop results other people are still
+reading, on the strength of a budget they never set. Give a shared cache its own
+retention policy.
 
 **`push` defaults to false, and that is the security model.** A build cache maps
 inputs to *outputs*, so anyone who can write to a cache you read from can hand

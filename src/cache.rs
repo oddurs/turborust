@@ -328,9 +328,40 @@ pub struct Record {
 /// the disk is worse than one that occasionally rebuilds.
 pub const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 
-/// Results retained per task. Keeps alternating between two branches fast without
-/// growing without bound.
-const KEEP_PER_TASK: usize = 10;
+/// How much may be written between sweeps before one is forced.
+///
+/// A sweep walks the whole store, so doing it on every `store` would make a
+/// warm cache quadratic in its own size. An eighth of the budget bounds the
+/// overshoot to something the disk will not notice.
+const SWEEP_EVERY: u64 = 8;
+
+/// One result in the store, as the sweeper sees it.
+struct Entry {
+    /// Milliseconds since the epoch.
+    used_at: u64,
+    bytes: u64,
+    record: PathBuf,
+    artifacts: PathBuf,
+    marker: PathBuf,
+}
+
+/// What the store is currently holding.
+#[derive(Debug, Default, Serialize)]
+pub struct Stats {
+    pub bytes: u64,
+    pub records: usize,
+    /// Task name -> (bytes, record count).
+    pub by_task: BTreeMap<String, (u64, usize)>,
+}
+
+/// What the last eviction dropped, so a surprising miss can be explained.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Sweep {
+    /// Seconds since the epoch.
+    pub at: u64,
+    pub dropped: usize,
+    pub freed: u64,
+}
 
 pub struct Cache {
     runs: PathBuf,
@@ -338,6 +369,37 @@ pub struct Cache {
     /// A second store, read after the local one and written only if `push`.
     shared: Option<PathBuf>,
     push: bool,
+    /// Byte budget for the local store; `None` keeps everything.
+    budget: Option<u64>,
+    /// Bytes written since the last sweep, so the walk is amortised.
+    written: std::sync::atomic::AtomicU64,
+}
+
+/// Milliseconds since the epoch.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Reads a use marker. `None` when it is absent or not a number.
+fn read_millis(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Total size of a directory tree, or 0 if it is not there.
+fn dir_bytes(dir: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_bytes(&e.path()),
+            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+        })
+        .sum()
 }
 
 /// Task names come from config keys; sanitise so `a/b` cannot escape the dir.
@@ -356,6 +418,12 @@ fn safe(name: &str) -> String {
 impl Cache {
     pub fn new(cache_dir: &Path) -> Result<Self> {
         Self::with_shared(cache_dir, None, false)
+    }
+
+    /// Sets the byte budget for the local store. `None` keeps everything.
+    pub fn with_budget(mut self, budget: Option<u64>) -> Self {
+        self.budget = budget;
+        self
     }
 
     /// Adds a second store, read after the local one.
@@ -382,6 +450,8 @@ impl Cache {
             artifacts,
             shared,
             push,
+            budget: None,
+            written: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -425,6 +495,7 @@ impl Cache {
         if let Ok(bytes) = std::fs::read(self.record_path(task, hash))
             && let Ok(rec) = serde_json::from_slice::<Record>(&bytes)
         {
+            self.touch(task, hash);
             return Some(rec);
         }
         // Fall through to the shared store, pulling anything found into the local
@@ -433,7 +504,36 @@ impl Cache {
         let bytes = std::fs::read(remote).ok()?;
         let rec: Record = serde_json::from_slice(&bytes).ok()?;
         let _ = self.pull_from_shared(task, hash, &rec);
+        self.touch(task, hash);
         Some(rec)
+    }
+
+    /// Records that a result was used, by writing the time into a marker file
+    /// beside it.
+    ///
+    /// The record itself is not rewritten: it carries a fingerprint with one
+    /// hash per input file, so a large crate closure makes it big, and paying
+    /// that write on every cache hit would tax the fast path to speed up
+    /// eviction. A marker costs one small write.
+    ///
+    /// The time is the marker's *contents*, not its mtime. Relying on mtime
+    /// failed on Windows: re-creating an already-empty file truncates nothing,
+    /// so NTFS does not treat it as a write and the timestamp never moves —
+    /// every entry then looks equally stale and eviction falls back to write
+    /// order, which is the bug this exists to fix. Content also survives a
+    /// cache directory being copied, which mtime does not reliably do.
+    fn touch(&self, task: &str, hash: &str) {
+        let path = self.marker_path(task, hash);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(path, now_millis().to_string());
+    }
+
+    fn marker_path(&self, task: &str, hash: &str) -> PathBuf {
+        self.runs
+            .join(safe(task))
+            .join(format!("{}.used", &hash[..hash.len().min(32)]))
     }
 
     /// Copies a shared result into the local cache.
@@ -457,6 +557,12 @@ impl Cache {
         let dir = self.runs.join(safe(task));
         let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
         for e in std::fs::read_dir(dir).ok()?.flatten() {
+            // Only records. The directory also holds `.used` markers, which are
+            // empty and touched on every hit — so the newest file here is
+            // usually a marker, and parsing it would make this return nothing.
+            if e.path().extension().and_then(|x| x.to_str()) != Some("json") {
+                continue;
+            }
             let Ok(m) = e.metadata() else { continue };
             let Ok(t) = m.modified() else { continue };
             if newest.as_ref().is_none_or(|(bt, _)| t > *bt) {
@@ -477,7 +583,9 @@ impl Cache {
         // Atomic rename: a crash mid-write must not leave a corrupt record that
         // would be read back as a false cache hit.
         std::fs::rename(&tmp, &path)?;
-        self.prune(&record.task);
+        // A freshly stored result counts as used: it was produced for this run.
+        self.touch(&record.task, &record.fingerprint.hash);
+        self.note_written(&record.task, &record.fingerprint.hash);
 
         // Contributing to a shared cache is opt-in: see the note on SharedCache.
         if self.push
@@ -550,29 +658,148 @@ impl Cache {
         Ok(true)
     }
 
-    /// Drops all but the newest [`KEEP_PER_TASK`] results for a task.
-    fn prune(&self, task: &str) {
-        let dir = self.runs.join(safe(task));
-        let Ok(entries) = std::fs::read_dir(&dir) else {
-            return;
-        };
-        let mut records: Vec<(std::time::SystemTime, PathBuf)> = entries
-            .flatten()
-            .filter_map(|e| {
-                let m = e.metadata().ok()?;
-                Some((m.modified().ok()?, e.path()))
-            })
-            .collect();
-        if records.len() <= KEEP_PER_TASK {
+    /// Drops least-recently-used results until the store fits its budget.
+    ///
+    /// "Recently used" means read, not written. Ordering by write time — which
+    /// is what this did before — evicts the entry you hit forty times a day in
+    /// favour of a one-off produced last night on a branch you have deleted,
+    /// which is precisely backwards for the access pattern a cache exists to
+    /// serve.
+    fn sweep(&self) {
+        let Some(budget) = self.budget else { return };
+        let mut entries = self.entries();
+        let mut total: u64 = entries.iter().map(|e| e.bytes).sum();
+        if total <= budget {
             return;
         }
-        records.sort_by_key(|(t, _)| *t);
-        for (_, path) in records.iter().take(records.len() - KEEP_PER_TASK) {
-            let hash = path.file_stem().map(|s| s.to_string_lossy().to_string());
-            let _ = std::fs::remove_file(path);
-            if let Some(h) = hash {
-                let _ = std::fs::remove_dir_all(self.artifacts.join(safe(task)).join(h));
+        // Oldest use first.
+        entries.sort_by_key(|e| e.used_at);
+        let (mut dropped, mut freed) = (0usize, 0u64);
+        for e in entries {
+            if total <= budget {
+                break;
             }
+            let _ = std::fs::remove_file(&e.record);
+            let _ = std::fs::remove_file(&e.marker);
+            let _ = std::fs::remove_dir_all(&e.artifacts);
+            total = total.saturating_sub(e.bytes);
+            dropped += 1;
+            freed += e.bytes;
+        }
+        // Recorded so a miss that a sweep caused can be explained rather than
+        // looking like the cache simply forgot.
+        if dropped > 0 {
+            let at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let sweep = Sweep { at, dropped, freed };
+            if let Ok(bytes) = serde_json::to_vec_pretty(&sweep) {
+                let _ = std::fs::write(self.sweep_path(), bytes);
+            }
+        }
+    }
+
+    fn sweep_path(&self) -> PathBuf {
+        self.runs
+            .parent()
+            .unwrap_or(&self.runs)
+            .join("last-sweep.json")
+    }
+
+    /// What the last eviction dropped, if one has happened.
+    pub fn last_sweep(&self) -> Option<Sweep> {
+        serde_json::from_slice(&std::fs::read(self.sweep_path()).ok()?).ok()
+    }
+
+    /// Size of the shared store, reported but never evicted from.
+    pub fn shared_bytes(&self) -> Option<u64> {
+        let dir = self.shared.as_ref()?;
+        Some(dir_bytes(&dir.join("runs")) + dir_bytes(&dir.join("artifacts")))
+    }
+
+    /// Every stored result, with its size and last use.
+    ///
+    /// Only the local store is walked. A shared cache is not this machine's to
+    /// garbage-collect: evicting from it would delete results other people are
+    /// still reading, on the strength of one machine's budget.
+    fn entries(&self) -> Vec<Entry> {
+        let mut out = Vec::new();
+        let Ok(tasks) = std::fs::read_dir(&self.runs) else {
+            return out;
+        };
+        for task in tasks.flatten() {
+            let Ok(records) = std::fs::read_dir(task.path()) else {
+                continue;
+            };
+            let task_name = task.file_name().to_string_lossy().to_string();
+            for rec in records.flatten() {
+                let path = rec.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(hash) = path.file_stem().map(|h| h.to_string_lossy().to_string()) else {
+                    continue;
+                };
+                let record_bytes = rec.metadata().map(|m| m.len()).unwrap_or(0);
+                let marker = path.with_extension("used");
+                let artifacts = self.artifacts.join(&task_name).join(&hash);
+                // A record written before markers existed has never been read
+                // since; its own mtime is the best evidence available.
+                let used_at = read_millis(&marker).unwrap_or_else(|| {
+                    rec.metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                });
+                out.push(Entry {
+                    used_at,
+                    bytes: record_bytes + dir_bytes(&artifacts),
+                    record: path,
+                    artifacts,
+                    marker,
+                });
+            }
+        }
+        out
+    }
+
+    /// What the local store is holding, for `turborust cache`.
+    pub fn stats(&self) -> Stats {
+        let mut stats = Stats::default();
+        for e in self.entries() {
+            let task = e
+                .record
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            stats.bytes += e.bytes;
+            stats.records += 1;
+            let slot = stats.by_task.entry(task).or_insert((0, 0));
+            slot.0 += e.bytes;
+            slot.1 += 1;
+        }
+        stats
+    }
+
+    pub fn budget(&self) -> Option<u64> {
+        self.budget
+    }
+
+    /// Tracks bytes added, and sweeps once enough has accumulated to be worth
+    /// the walk.
+    fn note_written(&self, task: &str, hash: &str) {
+        let Some(budget) = self.budget else { return };
+        let added = dir_bytes(&self.artifact_dir(task, hash));
+        let before = self
+            .written
+            .fetch_add(added, std::sync::atomic::Ordering::Relaxed);
+        if before + added >= budget / SWEEP_EVERY {
+            self.written.store(0, std::sync::atomic::Ordering::Relaxed);
+            self.sweep();
         }
     }
 
@@ -599,6 +826,120 @@ mod tests {
                 .collect(),
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn parses_sizes_in_both_decimal_and_binary_units() {
+        use crate::config::parse_size;
+        assert_eq!(parse_size("2048").unwrap(), Some(2048));
+        assert_eq!(parse_size("1KiB").unwrap(), Some(1024));
+        assert_eq!(parse_size("1kb").unwrap(), Some(1000));
+        assert_eq!(parse_size("10GiB").unwrap(), Some(10 * 1024 * 1024 * 1024));
+        // Zero is "keep everything", not "keep nothing" — a budget of zero
+        // bytes would make every store evict itself immediately.
+        assert_eq!(parse_size("0").unwrap(), None);
+        assert!(parse_size("10 furlongs").is_err());
+        assert!(parse_size("-1").is_err());
+    }
+
+    /// Builds a store holding `n` results for `task`, each with one output file
+    /// of `bytes` bytes. Returns the cache and the workspace root.
+    fn store_with(tag: &str, budget: Option<u64>, keys: &[&str], bytes: usize) -> (Cache, PathBuf) {
+        let root = std::env::temp_dir().join(format!("tr-evict-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let cache = Cache::new(&root.join("cache")).unwrap().with_budget(budget);
+        for key in keys {
+            let out = format!("{key}.bin");
+            std::fs::write(root.join(&out), vec![b'x'; bytes]).unwrap();
+            cache
+                .archive("t", key, &root, std::slice::from_ref(&out))
+                .unwrap();
+            cache
+                .store(&Record {
+                    task: "t".into(),
+                    // Records are addressed by their fingerprint's hash, so the
+                    // keys have to actually differ or they overwrite each other.
+                    fingerprint: Fingerprint {
+                        hash: (*key).to_string(),
+                        files: BTreeMap::new(),
+                        meta: BTreeMap::new(),
+                    },
+                    exit_code: 0,
+                    duration_ms: 1,
+                    outputs: vec![out],
+                    archived: true,
+                    output_hash: None,
+                })
+                .unwrap();
+        }
+        (cache, root)
+    }
+
+    #[test]
+    fn eviction_keeps_what_is_read_and_drops_what_is_merely_recent() {
+        // Four results, then a budget that only fits some of them.
+        let (cache, root) = store_with("lru", None, &["aaa", "bbb", "ccc"], 4096);
+
+        // `aaa` is the oldest by write time and the newest by use. Ordering by
+        // write time — which is what this did before — would evict exactly it.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        assert!(cache.load("t", "aaa").is_some(), "warm-up read");
+
+        let budget = 6 * 1024;
+        let cache = cache.with_budget(Some(budget));
+        cache.sweep();
+
+        assert!(
+            cache.load("t", "aaa").is_some(),
+            "the entry being read must survive the entry merely written later"
+        );
+        assert!(cache.stats().bytes <= budget, "store must fit its budget");
+        let sweep = cache.last_sweep().expect("an eviction was recorded");
+        assert!(sweep.dropped > 0 && sweep.freed > 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_second_read_records_a_later_use_than_the_first() {
+        // The direct form of what eviction depends on. Windows caught this the
+        // hard way: when the marker was empty and its mtime was the timestamp,
+        // re-creating it truncated nothing, NTFS did not count it as a write,
+        // and every entry stayed equally stale forever.
+        let (cache, root) = store_with("touch", None, &["aaa"], 16);
+        let marker = cache.marker_path("t", "aaa");
+        let first = read_millis(&marker).expect("storing records a use");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cache.load("t", "aaa").unwrap();
+        let second = read_millis(&marker).expect("reading records a use");
+        assert!(
+            second > first,
+            "a read must advance the use time ({first} -> {second})"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn no_budget_keeps_everything() {
+        let (cache, root) = store_with("nobudget", None, &["aaa", "bbb", "ccc"], 4096);
+        cache.sweep();
+        assert_eq!(cache.stats().records, 3);
+        assert!(cache.last_sweep().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_use_marker_does_not_look_like_a_record() {
+        // `.used` markers live beside records and are touched on every hit, so
+        // the newest file in the directory is usually a marker. load_latest must
+        // skip them or it returns nothing for a task that is being used.
+        let (cache, root) = store_with("marker", None, &["aaa"], 16);
+        assert!(cache.load("t", "aaa").is_some());
+        assert!(
+            cache.load_latest("t").is_some(),
+            "a touched marker must not hide the record it belongs to"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

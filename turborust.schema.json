@@ -457,6 +457,11 @@
       "description": "A second cache directory, shared with other machines or checkouts.\n\nThe trust model is the whole design, so it is stated here rather than in a\ndoc comment nobody reads: a build cache maps inputs to **outputs**, so anyone\nwho can write to a cache you read from can hand your build arbitrary\nartifacts. Reading is a trust decision; writing is a bigger one.\n\nTherefore `push` defaults to false. Pointing at a shared directory gets you\nits results; contributing yours is a separate, explicit choice.",
       "type": "object",
       "properties": {
+        "max_size": {
+          "description": "Byte budget for the local store: `10GiB`, `500MB`, or `0` to keep\neverything. Least-recently-*used* results are dropped first.\n\nDeliberately not applied to a shared store. A shared cache is not this\nmachine's to garbage-collect — evicting from it would delete results\nother people are still reading, on the strength of one machine's budget.",
+          "type": "string",
+          "default": "10GiB"
+        },
         "push": {
           "description": "Also write this machine's results there. Off unless asked for.",
           "type": "boolean",
