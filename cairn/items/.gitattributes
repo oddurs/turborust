@@ -1,3 +1,0 @@
-# Item files are LF regardless of platform, so they do not churn
-# when a repository is shared across systems.
-*.md text eol=lf
