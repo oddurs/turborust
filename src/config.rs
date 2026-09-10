@@ -947,16 +947,62 @@ mod tests {
         }
     }
 
-    /// The same guard the production path uses. Without it this test passes from
-    /// a shell and fails from a git hook, because the hook exports `GIT_DIR` and
-    /// every `git` child then operates on the wrong repository.
+    /// The same guard the production path uses, plus a hard check that we are
+    /// operating on the repository we think we are.
+    ///
+    /// This is not defensive dressing. Without `git_command` the hook-exported
+    /// `GIT_DIR` sends every `git` child at the *hook's* repository — and a
+    /// `git init` aimed there re-initialises a real checkout and marks it bare.
+    /// That happened while writing this test. A wrong repository must fail the
+    /// test rather than quietly modify somebody's work.
     fn git(args: &[&str], cwd: &Path) {
-        let ok = crate::affected::git_command(cwd)
+        let out = crate::affected::git_command(cwd)
             .args(args)
             .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false);
-        assert!(ok, "git {args:?} failed in {}", cwd.display());
+            .expect("git is available");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed in {}: {}",
+            cwd.display(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Refuses to continue unless `dir` is its own repository.
+    fn assert_owns_its_repo(dir: &Path) {
+        let out = crate::affected::git_command(dir)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output()
+            .expect("git is available");
+        let seen = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim().to_string());
+        let expected = dir.join(".git");
+        // Both must resolve. Comparing two `None`s would pass for a directory
+        // that is not a repository at all, which is the case this exists to catch.
+        let (Ok(seen), Ok(expected)) = (seen.canonicalize(), expected.canonicalize()) else {
+            panic!(
+                "{} is not its own git repository (git reported {:?}) — refusing to touch it",
+                dir.display(),
+                String::from_utf8_lossy(&out.stdout).trim()
+            );
+        };
+        assert_eq!(
+            seen,
+            expected,
+            "this test is pointed at {} instead of its own temporary repository — \
+             refusing to touch it",
+            seen.display()
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "refusing to touch it")]
+    fn the_repository_guard_rejects_a_directory_that_is_not_its_own_repo() {
+        let dir = std::env::temp_dir().join(format!("tr-guard-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // No `git init`: the guard must refuse rather than let a caller write
+        // into whatever repository git happens to resolve to.
+        assert_owns_its_repo(&dir);
     }
 
     #[test]
@@ -966,6 +1012,9 @@ mod tests {
         let repo = base.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         git(&["init", "-q", "."], &repo);
+        // Before anything that writes: prove we are in the temp repository and
+        // not somebody's actual checkout.
+        assert_owns_its_repo(&repo);
         git(&["config", "user.email", "a@b.c"], &repo);
         git(&["config", "user.name", "t"], &repo);
         std::fs::write(repo.join("f"), "x").unwrap();
