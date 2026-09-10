@@ -172,6 +172,19 @@ not change the build is to make sure the build never saw it. A `loose` task is
 never served from cache — being honestly uncacheable beats being occasionally
 wrong.
 
+### What `outputs` promises
+
+`outputs` is a claim that those files are everything the task produces that
+anything downstream could care about. Two things rest on it: a cache hit replays
+exactly those files and assumes nothing else was needed, and a dependent keys on
+their contents rather than on the fact the task ran.
+
+So a task that writes something it never declared — a file outside the globs, a
+row in a database — can under-invalidate its dependents, in the same way it can
+already be restored incompletely from cache. If a task has effects it cannot
+declare, give it `cache = "disabled"` and it will neither be replayed nor be
+treated as stable by anything downstream.
+
 The safe base is passed but not hashed: without `PATH` nothing runs, and hashing it
 would miss whenever a shell rearranged itself. Swapping toolchains via `PATH` is
 covered by the global hash (`0017`), which folds in `rustc -V` directly.
@@ -275,11 +288,21 @@ Design constraints worth knowing about:
   binary. Killing only the shell leaves the binary holding the port. turborust
   sends SIGTERM to the group, then SIGKILL after `stop_timeout`.
 - **Content-addressed cache keys.** blake3 over inputs, command, declared env
-  vars, declared outputs, env mode, and upstream keys. Results are stored *by key*,
-  so alternating between two branches hits both ways instead of overwriting.
-  A hit replays the archived outputs rather than assuming the tree was untouched;
-  results above 256 MiB are recorded but not archived, and fall back to checking
-  the files are still present.
+  vars, declared outputs, env mode, and an upstream stamp per dependency. Results
+  are stored *by key*, so alternating between two branches hits both ways instead
+  of overwriting. A hit replays the archived outputs rather than assuming the tree
+  was untouched; results above 256 MiB are recorded but not archived, and fall
+  back to checking the files are still present.
+- **Dependents key on what an upstream produced, not on the fact it ran.** If a
+  task declares `outputs`, its dependents fold in a hash of those files' contents;
+  if it declares none, they fold in its key. So fixing a doc comment in a shared
+  crate re-runs `check` — its inputs did change — but does not rebuild everything
+  below it on the strength of a byte-identical artifact. `why` names which rule
+  applied:
+
+  ```
+  ~ [dep:gen]  outputs b3:350324e4 -> outputs b3:f0356a38
+  ```
 - **Cascade dispatch.** When one edit matches several nodes, only the upstream-most
   are signalled; dependents come back through the readiness cascade instead of
   restarting twice.

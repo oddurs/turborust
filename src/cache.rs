@@ -161,9 +161,30 @@ impl Change {
             Change::Modified { path, from, to } => {
                 format!("~ {path}  b3:{} -> b3:{}", s(from), s(to))
             }
-            Change::Meta { key, from, to } => format!("~ [{key}]  {from} -> {to}"),
+            Change::Meta { key, from, to } => {
+                // Dependency stamps are `key:<hex>` or `out:<hex>`. Printed raw
+                // they are two 64-character hashes and a reader learns nothing.
+                if let (Some(a), Some(b)) = (stamp(from), stamp(to)) {
+                    format!("~ [{key}]  {a} -> {b}")
+                } else {
+                    format!("~ [{key}]  {from} -> {to}")
+                }
+            }
         }
     }
+}
+
+/// Renders a dependency stamp as its rule and a short hash: `outputs b3:5f16c070`.
+fn stamp(v: &str) -> Option<String> {
+    let (tag, hex) = v.split_once(':')?;
+    let rule = match tag {
+        "out" => "outputs",
+        "key" => "key",
+        _ => return None,
+    };
+    let short: String = hex.chars().take(8).collect();
+    (short.len() == 8 && short.chars().all(|c| c.is_ascii_hexdigit()))
+        .then(|| format!("{rule} b3:{short}"))
 }
 
 /// Everything that differs between `old` and `new`.
@@ -247,6 +268,39 @@ pub fn collect_outputs(root: &Path, matcher: &Matcher) -> Vec<String> {
     found
 }
 
+/// Hashes the *contents* of a task's declared outputs.
+///
+/// This is what a dependent keys on when its upstream declared outputs: the
+/// question that matters downstream is what the upstream produced, not whether
+/// it happened to run.
+///
+/// `None` when nothing was produced. An empty set of outputs would hash to a
+/// single constant, so every task that declared outputs and produced none would
+/// collide with every other — and a build that exits 0 without writing its
+/// declared outputs is exactly the case where a dependent must not be told
+/// "nothing changed".
+pub fn hash_outputs(root: &Path, files: &[String]) -> Option<String> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut sorted: Vec<&String> = files.iter().collect();
+    sorted.sort();
+    let mut h = blake3::Hasher::new();
+    h.update(b"turborust-outputs-v1\0");
+    let mut any = false;
+    for rel in sorted {
+        let Ok(bytes) = std::fs::read(root.join(rel)) else {
+            continue;
+        };
+        any = true;
+        h.update(rel.as_bytes());
+        h.update(b"\0");
+        h.update(blake3::hash(&bytes).as_bytes());
+        h.update(b"\0");
+    }
+    any.then(|| h.finalize().to_hex().to_string())
+}
+
 /// On-disk record of one successful run, addressed by its cache key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -261,6 +315,13 @@ pub struct Record {
     /// be replayed if the files are still on disk.
     #[serde(default)]
     pub archived: bool,
+    /// [`hash_outputs`] over `outputs`, so a dependent can key on what this task
+    /// produced without re-reading the files on every hit.
+    ///
+    /// Absent on records written before dependents keyed on outputs; those fall
+    /// back to hashing on demand.
+    #[serde(default)]
+    pub output_hash: Option<String>,
 }
 
 /// Outputs larger than this are not archived. A dev cache that can silently eat
@@ -538,6 +599,61 @@ mod tests {
                 .collect(),
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn outputs_hash_by_content_not_by_name() {
+        let dir = std::env::temp_dir().join(format!("tr-outhash-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a"), b"same").unwrap();
+        let first = hash_outputs(&dir, &["a".into()]).unwrap();
+
+        // Rewriting identical bytes must not move the hash: that is the whole
+        // point of keying a dependent on outputs rather than on a re-run.
+        std::fs::write(dir.join("a"), b"same").unwrap();
+        assert_eq!(hash_outputs(&dir, &["a".into()]).unwrap(), first);
+
+        std::fs::write(dir.join("a"), b"different").unwrap();
+        assert_ne!(hash_outputs(&dir, &["a".into()]).unwrap(), first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_task_that_produced_nothing_has_no_output_hash() {
+        let dir = std::env::temp_dir().join(format!("tr-outnone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        // Declared but absent. Hashing the empty set would give every such task
+        // the same stamp, which would tell a dependent "nothing changed" about a
+        // build that produced none of what it promised.
+        assert_eq!(hash_outputs(&dir, &[]), None);
+        assert_eq!(hash_outputs(&dir, &["missing".into()]), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dependency_stamp_renders_as_its_rule_and_a_short_hash() {
+        let h = "5f16c0708c3d4e2a";
+        assert_eq!(
+            Change::Meta {
+                key: "dep:gen".into(),
+                from: format!("out:{h}"),
+                to: format!("out:{h}"),
+            }
+            .render(),
+            "~ [dep:gen]  outputs b3:5f16c070 -> outputs b3:5f16c070"
+        );
+        // Anything that is not a stamp still prints verbatim.
+        assert_eq!(
+            Change::Meta {
+                key: "env:PROFILE".into(),
+                from: "dev".into(),
+                to: "release".into(),
+            }
+            .render(),
+            "~ [env:PROFILE]  dev -> release"
+        );
     }
 
     #[test]

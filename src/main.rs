@@ -408,6 +408,7 @@ fn cmd_why(config: Option<&std::path::Path>, target: &str) -> Result<i32> {
         return Ok(0);
     }
 
+    engine.seed_stamps_from_cache(&node);
     let now = engine.fingerprint(&node)?;
     println!(
         "  \u{1b}[2m{} input files, key b3:{}\u{1b}[0m\n",
