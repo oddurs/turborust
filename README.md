@@ -402,6 +402,37 @@ than no record.
 Off by default: checking costs a rebuild, and that is a price to opt into rather
 than one to discover.
 
+### Where results live
+
+Not in `.turborust/`. Results are content-addressed, so two checkouts of one
+repository at one commit produce the same keys and the same artifacts — and this
+project's own workflow is a worktree per branch, which means a per-checkout
+store makes every new branch pay a full cold build for answers already on the
+disk.
+
+The store is therefore per **repository**, in your user cache directory, keyed by
+`git rev-parse --git-common-dir` — which resolves to the same place from every
+worktree of a repository, and is exactly the identity wanted. Outside a git
+repository the workspace path is the only identity available, which is the old
+behaviour. `.turborust/` keeps what is genuinely per-checkout: run summaries and
+scratch space.
+
+```toml
+[cache]
+dir = "vendor/cache"   # override, if you want it somewhere specific
+```
+
+An existing `.turborust/` cache is moved into the shared store the first time
+turborust runs, so upgrading does not start you cold. Because the store is now
+shared, `turborust clean` empties it for **every** worktree of the repository,
+and says so.
+
+Two turborust processes can now be writing the same key at the same moment.
+Records go to a per-process temporary name and are renamed into place, and
+archives are staged in a scratch directory and swapped in — a half-written
+archive under the real name would pass `restore`'s existence check and replay
+truncated files.
+
 ### What the local store keeps
 
 `max_size` is a byte budget, and results are dropped least-recently-**used**

@@ -56,7 +56,7 @@ fn in_worktree(root: &Path) -> bool {
 /// `current_dir(root)` still reports on the *hook's* repository, whatever
 /// directory it was pointed at. Anything invoked from a hook, or from another
 /// tool that exported these, would silently answer about the wrong repository.
-fn git_command(root: &Path) -> Command {
+pub(crate) fn git_command(root: &Path) -> Command {
     let mut cmd = Command::new("git");
     cmd.current_dir(root);
     for var in [

@@ -135,19 +135,16 @@ Documented, tested, and safe to depend on.
 
 ## v1.3 — A cache you can audit
 
-`########··` 75% · 3 of 4 done · due 2027-09-01
+`##########` 100% · 4 of 4 done · due 2027-09-01
 
 The cache is the load-bearing claim in this project. `why` explains it, the
-
-### backlog
-
-- [ ] `0072` Sibling worktrees each start with a cold cache <sup>bug · p2</sup>
 
 ### done
 
 - [x] `0069` Downstream rebuilds when an upstream re-runs with identical output <sup>bug · p1</sup>
 - [x] `0070` The cache is bounded by count, and evicts what you use most <sup>bug · p1</sup>
 - [x] `0071` Nothing proves a task is deterministic <sup>feature · p1</sup>
+- [x] `0072` Sibling worktrees each start with a cold cache <sup>bug · p2</sup>
 
 ## v1.4 — The loop keeps up
 
