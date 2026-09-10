@@ -1,0 +1,22 @@
+#!/bin/sh
+# The full gate. Everything a reviewer would otherwise have to catch.
+
+set -eu
+printf '  linting…\n'
+if ! cargo clippy --all-targets --quiet -- -D warnings 2>&1 | tail -20; then
+    printf '\n  push rejected: clippy found problems\n\n' >&2
+    exit 1
+fi
+
+printf '  testing…\n'
+# Captured, not piped: "tests are failing" without a name sends the reader back
+# to run the suite again by hand, which is the one thing a hook should spare them.
+if ! out=$(cargo test --quiet 2>&1); then
+    printf '\n  push rejected: tests are failing\n\n' >&2
+    printf '%s\n' "$out" | grep -E '^test result:|^test .*FAILED' | sed 's/^/    /' >&2
+    printf '%s\n' "$out" | grep -A4 '^---- ' | head -12 | sed 's/^/    /' >&2
+    printf '\n' >&2
+    exit 1
+fi
+
+printf '  green\n'

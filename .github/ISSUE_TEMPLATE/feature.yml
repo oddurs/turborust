@@ -1,0 +1,21 @@
+name: Feature
+description: Something turborust should do and does not
+labels: [feature]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and where does it break down?
+    validations: { required: true }
+  - type: textarea
+    id: shape
+    attributes:
+      label: What it might look like
+      description: Config, a command, output — a sketch is fine.
+  - type: markdown
+    attributes:
+      value: |
+        Worth a look first: several things comparable tools ship were considered
+        and declined on purpose, with reasons — `cairn search <topic> --all`, or
+        the "Out of scope" section of [ROADMAP.md](../../ROADMAP.md).

@@ -1,0 +1,23 @@
+#!/bin/sh
+# Fast checks only. Anything slower belongs in pre-push, where it is paid once
+# per branch rather than once per commit — a hook that makes committing feel
+# expensive is a hook people learn to skip.
+
+set -eu
+printf '  checking formatting and roadmap…\n'
+
+if ! cargo fmt --check >/dev/null 2>&1; then
+    printf '\n  commit rejected: code is not formatted\n\n    run: cargo fmt\n\n' >&2
+    exit 1
+fi
+
+if command -v cairn >/dev/null 2>&1 && [ -f cairn.toml ]; then
+    if ! cairn check >/dev/null 2>&1; then
+        printf '\n  commit rejected: the roadmap does not validate\n\n    run: cairn check\n\n' >&2
+        exit 1
+    fi
+    # A roadmap that has drifted from its items is the rot cairn exists to
+    # prevent, so it is regenerated here rather than left to memory.
+    cairn render -q >/dev/null 2>&1 || true
+    git add ROADMAP.md 2>/dev/null || true
+fi
