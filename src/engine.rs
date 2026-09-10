@@ -23,7 +23,7 @@ use crate::proc::{self, Handle, ProcEvent};
 use crate::state::{AppState, Status};
 use anyhow::Result;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{broadcast, mpsc, watch};
@@ -64,6 +64,10 @@ pub struct Engine {
     notifier: Mutex<crate::notify::Notifier>,
     /// Per-task outcomes for this run, in completion order.
     outcomes: Mutex<Vec<crate::summary::TaskOutcomeRecord>>,
+    /// How much of the cache to check against reality, and how many hits have
+    /// gone by since the last check.
+    verify: crate::config::VerifyMode,
+    hits: AtomicU64,
     /// Build parallelism.
     ///
     /// The resource being limited is *building*, not running. A service holds a
@@ -77,6 +81,16 @@ impl Engine {
     pub fn new(
         plan: Arc<Plan>,
         cache: Arc<Cache>,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<ProcEvent>) {
+        Self::new_verifying(plan, cache, crate::config::VerifyMode::Off)
+    }
+
+    /// As [`Engine::new`], but re-checking some share of cache hits against what
+    /// the task actually produces.
+    pub fn new_verifying(
+        plan: Arc<Plan>,
+        cache: Arc<Cache>,
+        verify: crate::config::VerifyMode,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<ProcEvent>) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (reload_tx, _) = broadcast::channel(64);
@@ -116,6 +130,8 @@ impl Engine {
             events_tx,
             reload_tx,
             stamps: Mutex::new(BTreeMap::new()),
+            verify,
+            hits: AtomicU64::new(0),
             force: AtomicBool::new(false),
             passthrough: Mutex::new(None),
             handles: Mutex::new(BTreeMap::new()),
@@ -288,6 +304,18 @@ impl Engine {
         Ok(cache::combine(files, meta))
     }
 
+    /// Whether this hit is one of the ones being checked.
+    fn should_verify(&self) -> bool {
+        match self.verify {
+            crate::config::VerifyMode::Off => false,
+            crate::config::VerifyMode::Always => true,
+            crate::config::VerifyMode::Sample => {
+                let n = self.hits.fetch_add(1, Ordering::Relaxed);
+                n.is_multiple_of(crate::config::VERIFY_SAMPLE_RATE)
+            }
+        }
+    }
+
     fn stamp(&self, name: &str, value: String) {
         self.stamps.lock().unwrap().insert(name.to_string(), value);
     }
@@ -427,8 +455,65 @@ impl Engine {
         cache::Matcher::new(&node.outputs, &[])
     }
 
+    /// The files a node's `outputs` globs currently match on disk.
+    pub fn declared_outputs(&self, node: &Node) -> Vec<String> {
+        match self.output_matcher(node) {
+            Ok(m) => cache::collect_outputs(&self.plan.root, &m),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// Removes a node's declared outputs, so the next run has to produce them.
+    ///
+    /// Without this a second run of an incremental tool is often a no-op that
+    /// trivially reproduces byte-identical files, and the check proves nothing.
+    pub fn clear_outputs(&self, node: &Node) {
+        for rel in self.declared_outputs(node) {
+            let _ = std::fs::remove_file(self.plan.root.join(rel));
+        }
+    }
+
     fn outputs_present(&self, node: &Node) -> bool {
         node.outputs.iter().all(|o| self.plan.root.join(o).exists())
+    }
+
+    /// Re-runs a task that just hit, and reports if it did not reproduce what
+    /// the cache had stored.
+    ///
+    /// Returns `None` when the cache told the truth.
+    async fn recheck(&self, node: &Node, name: &str, rec: &Record) -> Result<Option<String>> {
+        let promised = rec.output_hash.clone().unwrap_or_default();
+        self.clear_outputs(node);
+        let cmd = self.command_for(node);
+        let handle = proc::spawn_with(
+            name,
+            &cmd,
+            &node.cwd,
+            &self.child_env(node),
+            node.env_mode == EnvMode::Strict,
+            self.events_tx.clone(),
+        )?;
+        if wait_exit(&handle).await != 0 {
+            // The task cannot be re-run right now. That is a problem, but it is
+            // not evidence the stored result was wrong.
+            return Ok(Some(format!(
+                "verify: `{name}` failed when re-run, so its cached result could not be checked"
+            )));
+        }
+        let produced = cache::hash_outputs(&self.plan.root, &self.declared_outputs(node));
+        if produced.as_deref() == Some(promised.as_str()) {
+            return Ok(None);
+        }
+        Ok(Some(format!(
+            "verify: `{name}` did not reproduce its cached outputs \
+             (stored b3:{}, produced b3:{}). The entry has been dropped; run \
+             `turborust verify {name}` to see which file differs.",
+            promised.chars().take(8).collect::<String>(),
+            produced
+                .as_deref()
+                .map(|h| h.chars().take(8).collect::<String>())
+                .unwrap_or_else(|| "nothing".into()),
+        )))
     }
 
     /// Runs a task, honouring the cache. Never restarts; that is the caller's job.
@@ -471,6 +556,25 @@ impl Engine {
             } else {
                 self.outputs_present(&node)
             };
+            // A hit is a promise that this key reproduces these outputs. Under
+            // `verify` a share of those promises get tested, because a cache
+            // that has started lying does it silently and forever.
+            if replayed
+                && rec.output_hash.is_some()
+                && !node.outputs.is_empty()
+                && self.should_verify()
+                && let Some(failure) = self.recheck(&node, name, &rec).await?
+            {
+                self.cache.forget(name, &fp.hash);
+                self.log(name, failure.clone());
+                self.set(name, Status::Failed(1));
+                return Ok(TaskOutcome {
+                    cached: false,
+                    code: 1,
+                    duration: start.elapsed(),
+                    fingerprint: Some(fp.clone()),
+                });
+            }
             if replayed {
                 // The replayed outputs are what dependents key on, exactly as
                 // they would after a real run.

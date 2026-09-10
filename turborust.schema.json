@@ -473,6 +473,10 @@
             "string",
             "null"
           ]
+        },
+        "verify": {
+          "description": "Re-run some cache hits and check they really reproduce what was stored.",
+          "$ref": "#/$defs/VerifyMode"
         }
       },
       "additionalProperties": false
@@ -618,6 +622,26 @@
       "required": [
         "cert",
         "key"
+      ]
+    },
+    "VerifyMode": {
+      "description": "How much of the cache to check against reality as you go.\n\n`turborust verify` answers the question deliberately; this answers it during\nordinary work, which is when a cache actually starts lying to you.",
+      "oneOf": [
+        {
+          "description": "Trust the cache. The default: checking costs a rebuild.",
+          "type": "string",
+          "const": "off"
+        },
+        {
+          "description": "Check one hit in [`VERIFY_SAMPLE_RATE`].",
+          "type": "string",
+          "const": "sample"
+        },
+        {
+          "description": "Check every hit. Correct, and roughly as slow as having no cache.",
+          "type": "string",
+          "const": "always"
+        }
       ]
     }
   }

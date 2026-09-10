@@ -86,6 +86,17 @@ enum Cmd {
     Connect { node: String },
     /// Explain what a task would do right now, and why.
     Why { target: String },
+    /// Run tasks twice and prove their outputs match.
+    ///
+    /// A cache is only sound if the same key really does imply the same
+    /// outputs. Nothing else checks that, and a content-addressed cache is the
+    /// only kind that cheaply can.
+    Verify {
+        /// Tasks to check. Defaults to every cacheable task in the plan.
+        targets: Vec<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Report what is costing you seconds on every rebuild.
     Doctor {
         /// Offer to apply each suggestion, one at a time. Never applies anything
@@ -148,6 +159,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Plan => cmd_plan(cli.config.as_deref()),
         Cmd::Graph { format, with_cache } => cmd_graph(cli.config.as_deref(), &format, with_cache),
         Cmd::Why { target } => cmd_why(cli.config.as_deref(), &target),
+        Cmd::Verify { targets, json } => cmd_verify(cli.config.as_deref(), targets, json).await,
         Cmd::Connect { node } => {
             let ws = load(cli.config.as_deref())?;
             turborust::control::connect(&ws.cache_dir(), &node).await
@@ -604,7 +616,7 @@ async fn cmd_run(
     }
     let plan = Arc::new(plan::resolve(&ws, &targets)?);
     let cache = Arc::new(open_cache(&ws)?);
-    let (engine, rx) = Engine::new(plan.clone(), cache.clone());
+    let (engine, rx) = Engine::new_verifying(plan.clone(), cache.clone(), ws.config.cache.verify);
     engine.set_force(output.force);
     if !args.is_empty() {
         // Only the task the user named: a dependency has no idea what
@@ -666,7 +678,7 @@ async fn cmd_up(
         watch::watch(&ws.root, Duration::from_millis(120)).context("starting file watcher")?;
     let plan = Arc::new(plan::resolve(&ws, &targets)?);
     let cache = Arc::new(open_cache(&ws)?);
-    let (engine, rx) = Engine::new(plan.clone(), cache);
+    let (engine, rx) = Engine::new_verifying(plan.clone(), cache, ws.config.cache.verify);
 
     tokio::spawn(engine::pump_events(engine.state.clone(), rx, no_tui));
 
@@ -872,6 +884,220 @@ cmd = "cargo build"
 inputs = ["crates/**/*.rs", "Cargo.lock"]
 outputs = ["target/debug/api"]
 "#;
+
+/// Runs each task twice and compares what it produced.
+///
+/// The cache maps a key to a set of outputs and replays them on a hit. That is
+/// only sound if the same key really does imply the same outputs — and nothing
+/// checks. A task that embeds a timestamp, iterates a `HashMap`, or bakes in an
+/// absolute path will have one of its several possible answers served forever,
+/// silently.
+///
+/// Declared outputs are removed before each run. Without that, a second run of
+/// an incremental tool is usually a no-op that reproduces byte-identical files
+/// and proves nothing.
+async fn cmd_verify(
+    config: Option<&std::path::Path>,
+    targets: Vec<String>,
+    json: bool,
+) -> Result<i32> {
+    let ws = load(config)?;
+    let all = targets.is_empty();
+    // Resolving with no targets means "the default set", which is the services —
+    // and a workspace of pure tasks has none. Verifying everything has to name
+    // everything.
+    let resolved: Vec<String> = if all {
+        ws.config.tasks.keys().cloned().collect()
+    } else {
+        targets.clone()
+    };
+    if resolved.is_empty() {
+        println!("\n  no tasks defined, so there is nothing to verify.\n");
+        return Ok(0);
+    }
+    let plan = Arc::new(plan::resolve(&ws, &resolved)?);
+
+    let checkable: Vec<String> = plan
+        .nodes
+        .values()
+        .filter(|n| n.kind == Kind::Task && !n.outputs.is_empty())
+        .filter(|n| all || targets.contains(&n.name))
+        .map(|n| n.name.clone())
+        .collect();
+
+    if checkable.is_empty() {
+        // Not a failure: there is simply nothing here whose determinism is
+        // observable. A task with no declared outputs produces nothing to compare.
+        println!("\n  no task declares `outputs`, so there is nothing to compare.\n");
+        return Ok(0);
+    }
+
+    let cache = Arc::new(open_cache(&ws)?);
+    let (engine, rx) = Engine::new(plan.clone(), cache);
+    tokio::spawn(turborust::engine::pump_events(
+        engine.state.clone(),
+        rx,
+        false,
+    ));
+
+    // Bring dependencies up first, so each pair of runs differs only in when it
+    // happened.
+    let code = turborust::engine::run_once(engine.clone()).await?;
+    if code != 0 {
+        eprintln!("\n  the plan does not build, so there is nothing to verify.\n");
+        return Ok(code);
+    }
+
+    let mut reports = Vec::new();
+    for name in &checkable {
+        let node = plan.get(name)?.clone();
+        let mut runs = Vec::new();
+        for _ in 0..2 {
+            engine.clear_outputs(&node);
+            let outcome = engine.run_task(name, true).await?;
+            if outcome.code != 0 {
+                anyhow::bail!("`{name}` failed while verifying (exit {})", outcome.code);
+            }
+            let files = engine.declared_outputs(&node);
+            let mut hashes = std::collections::BTreeMap::new();
+            for rel in &files {
+                if let Ok(bytes) = std::fs::read(ws.root.join(rel)) {
+                    hashes.insert(rel.clone(), blake3::hash(&bytes).to_hex().to_string());
+                }
+            }
+            // Keep the first run's bytes so the second can be diffed against them.
+            let stash = ws
+                .cache_dir()
+                .join("verify")
+                .join(safe_name(name))
+                .join(if runs.is_empty() { "a" } else { "b" });
+            let _ = std::fs::remove_dir_all(&stash);
+            for rel in &files {
+                let dest = stash.join(rel);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::copy(ws.root.join(rel), dest);
+            }
+            runs.push((hashes, stash));
+        }
+
+        let (first, first_dir) = &runs[0];
+        let (second, second_dir) = &runs[1];
+        let mut differing = Vec::new();
+        for (rel, a) in first {
+            match second.get(rel) {
+                Some(b) if b == a => {}
+                Some(b) => differing.push(serde_json::json!({
+                    "path": rel,
+                    "first": a,
+                    "second": b,
+                    "divergence": turborust::cache::first_difference(
+                        &first_dir.join(rel), &second_dir.join(rel)),
+                })),
+                None => differing.push(serde_json::json!({
+                    "path": rel, "first": a, "second": null, "divergence": null,
+                })),
+            }
+        }
+        for rel in second.keys() {
+            if !first.contains_key(rel) {
+                differing.push(serde_json::json!({
+                    "path": rel, "first": null, "second": second[rel], "divergence": null,
+                }));
+            }
+        }
+        let _ = std::fs::remove_dir_all(ws.cache_dir().join("verify").join(safe_name(name)));
+        reports.push(serde_json::json!({
+            "task": name,
+            "deterministic": differing.is_empty(),
+            "outputs": first.len(),
+            "differing": differing,
+        }));
+    }
+
+    let bad = reports
+        .iter()
+        .filter(|r| r["deterministic"] == serde_json::json!(false))
+        .count();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "deterministic": bad == 0,
+                "tasks": reports,
+            }))?
+        );
+        return Ok((bad > 0) as i32);
+    }
+
+    println!();
+    for r in &reports {
+        let task = r["task"].as_str().unwrap_or_default();
+        if r["deterministic"] == serde_json::json!(true) {
+            println!(
+                "  \u{1b}[32m✓\u{1b}[0m \u{1b}[1m{task}\u{1b}[0m \u{1b}[2m— deterministic ({} output(s), 2 runs identical)\u{1b}[0m",
+                r["outputs"]
+            );
+            continue;
+        }
+        println!(
+            "  \u{1b}[31m✗\u{1b}[0m \u{1b}[1m{task}\u{1b}[0m \u{1b}[31mNOT DETERMINISTIC\u{1b}[0m"
+        );
+        for d in r["differing"].as_array().into_iter().flatten() {
+            let short = |v: &serde_json::Value| {
+                v.as_str()
+                    .map(|h| format!("b3:{}", &h[..8.min(h.len())]))
+                    .unwrap_or_else(|| "absent".into())
+            };
+            println!(
+                "      ~ {}  {} -> {}",
+                d["path"].as_str().unwrap_or_default(),
+                short(&d["first"]),
+                short(&d["second"])
+            );
+            if let Some(v) = d["divergence"].as_object() {
+                let g = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
+                let (offset, run, la, lb) = (g("offset"), g("run"), g("left_len"), g("right_len"));
+                let hint = if la != lb {
+                    "different lengths — output is not just a stamped field"
+                } else if run <= 16 {
+                    "a short run: usually an embedded timestamp or build id"
+                } else {
+                    "a long run: usually ordering, such as map iteration"
+                };
+                println!(
+                    "        differs at offset {offset:#x}, {run} byte(s) — \u{1b}[2m{hint}\u{1b}[0m"
+                );
+            }
+        }
+    }
+
+    if bad > 0 {
+        println!(
+            "\n  \u{1b}[31m{bad} task(s) are not reproducible.\u{1b}[0m A cache key cannot promise\n  \
+             an output it does not determine — see the causes in the docs.\n"
+        );
+    } else {
+        println!();
+    }
+    Ok((bad > 0) as i32)
+}
+
+/// Task names reach the filesystem here; keep them to one safe segment.
+fn safe_name(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 #[cfg(test)]
 mod scaffold_tests {

@@ -179,7 +179,7 @@ pub enum RestartPolicy {
 ///
 /// Therefore `push` defaults to false. Pointing at a shared directory gets you
 /// its results; contributing yours is a separate, explicit choice.
-#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Default)]
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SharedCache {
     /// Directory to read results from, in addition to the local cache. A network
@@ -196,10 +196,49 @@ pub struct SharedCache {
     /// other people are still reading, on the strength of one machine's budget.
     #[serde(default = "d_cache_budget")]
     pub max_size: String,
+    /// Re-run some cache hits and check they really reproduce what was stored.
+    #[serde(default)]
+    pub verify: VerifyMode,
 }
+
+/// How much of the cache to check against reality as you go.
+///
+/// `turborust verify` answers the question deliberately; this answers it during
+/// ordinary work, which is when a cache actually starts lying to you.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerifyMode {
+    /// Trust the cache. The default: checking costs a rebuild.
+    #[default]
+    Off,
+    /// Check one hit in [`VERIFY_SAMPLE_RATE`].
+    Sample,
+    /// Check every hit. Correct, and roughly as slow as having no cache.
+    Always,
+}
+
+/// One hit in this many is re-run under `verify = "sample"`.
+///
+/// Fixed rather than configurable: the useful range is narrow, and a float in a
+/// config file invites tuning a number nobody can reason about.
+pub const VERIFY_SAMPLE_RATE: u64 = 20;
 
 fn d_cache_budget() -> String {
     "10GiB".into()
+}
+
+/// Hand-written, not derived. `Config.cache` is `#[serde(default)]`, so a config
+/// with no `[cache]` table at all constructs this through `Default` — which
+/// skips serde's per-field defaults entirely and would leave `max_size` empty.
+impl Default for SharedCache {
+    fn default() -> Self {
+        SharedCache {
+            shared: None,
+            push: false,
+            max_size: d_cache_budget(),
+            verify: VerifyMode::Off,
+        }
+    }
 }
 
 /// The in-browser dev overlay.
@@ -819,6 +858,18 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_config_with_no_cache_table_still_has_a_budget() {
+        // `Config.cache` is #[serde(default)], so a missing `[cache]` table goes
+        // through Default rather than serde's per-field defaults. A derived
+        // Default left max_size empty and every command failed with "empty size".
+        let cfg: Config = toml::from_str("[tasks.a]\ncmd = \"true\"").unwrap();
+        assert_eq!(
+            parse_size(&cfg.cache.max_size).unwrap(),
+            Some(10 * 1024 * 1024 * 1024)
+        );
+    }
 
     #[test]
     fn durations() {
