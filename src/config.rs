@@ -199,6 +199,10 @@ pub struct SharedCache {
     /// Re-run some cache hits and check they really reproduce what was stored.
     #[serde(default)]
     pub verify: VerifyMode,
+    /// Where to keep results. Defaults to a per-user store shared by every
+    /// worktree of this repository, because results are content-addressed and
+    /// therefore portable between them.
+    pub dir: Option<String>,
 }
 
 /// How much of the cache to check against reality as you go.
@@ -237,6 +241,7 @@ impl Default for SharedCache {
             push: false,
             max_size: d_cache_budget(),
             verify: VerifyMode::Off,
+            dir: None,
         }
     }
 }
@@ -631,8 +636,36 @@ impl Workspace {
         Ok(ws)
     }
 
+    /// Per-checkout state: run summaries, scratch space, and the name the
+    /// control socket is derived from. Stays beside the code it describes.
     pub fn cache_dir(&self) -> PathBuf {
         self.root.join(".turborust")
+    }
+
+    /// Where cached results live.
+    ///
+    /// Not in `.turborust/`, which is per-checkout. This project's own workflow
+    /// is a worktree per branch, and results are content-addressed — two
+    /// worktrees at the same commit produce the same keys and the same
+    /// artifacts, so giving each its own store means paying a full cold build
+    /// for answers already on the disk.
+    ///
+    /// Keyed by *repository*, not by checkout: `git rev-parse --git-common-dir`
+    /// resolves to the primary repository for every worktree of it, which is
+    /// exactly the identity wanted. Outside a repository the root path is the
+    /// only identity available, which reproduces the old behaviour.
+    pub fn store_dir(&self) -> PathBuf {
+        if let Some(dir) = &self.config.cache.dir {
+            let p = PathBuf::from(expand_home(dir));
+            return if p.is_absolute() {
+                p
+            } else {
+                self.root.join(p)
+            };
+        }
+        let identity = repository_identity(&self.root).unwrap_or_else(|| self.root.clone());
+        let key = blake3::hash(identity.to_string_lossy().as_bytes()).to_hex();
+        user_cache_root().join("turborust").join(&key[..16])
     }
 
     pub fn resolve_cwd(&self, cwd: &Option<String>) -> PathBuf {
@@ -792,6 +825,55 @@ fn find_config() -> Result<PathBuf> {
     }
 }
 
+/// The git repository a path belongs to, shared by all of its worktrees.
+fn repository_identity(root: &Path) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        // A hook invoking turborust exports these, and inheriting them would
+        // answer about the wrong repository entirely.
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .current_dir(root)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8(out.stdout).ok()?.trim().to_string();
+    (!path.is_empty()).then(|| PathBuf::from(path))
+}
+
+/// The per-user cache directory this platform expects.
+fn user_cache_root() -> PathBuf {
+    #[cfg(windows)]
+    if let Ok(local) = std::env::var("LOCALAPPDATA") {
+        return PathBuf::from(local);
+    }
+    if let Ok(xdg) = std::env::var("XDG_CACHE_HOME")
+        && !xdg.is_empty()
+    {
+        return PathBuf::from(xdg);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        #[cfg(target_os = "macos")]
+        return PathBuf::from(home).join("Library").join("Caches");
+        #[cfg(not(target_os = "macos"))]
+        return PathBuf::from(home).join(".cache");
+    }
+    std::env::temp_dir()
+}
+
+/// Expands a leading `~`, which is where a user-level path usually starts.
+pub fn expand_home(path: &str) -> String {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var("HOME")
+            .map(|h| format!("{h}/{rest}"))
+            .unwrap_or_else(|_| path.to_string()),
+        None => path.to_string(),
+    }
+}
+
 /// Parses `10GiB`, `500MB`, `2048`, or `0` for no limit.
 ///
 /// Both the decimal and binary units are accepted and mean what they say: `MB`
@@ -858,6 +940,84 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn ws_at(root: &Path, toml_src: &str) -> Workspace {
+        Workspace {
+            root: root.to_path_buf(),
+            config: toml::from_str(toml_src).unwrap(),
+            source: Some(toml_src.to_string()),
+        }
+    }
+
+    fn git(args: &[&str], cwd: &Path) {
+        let ok = std::process::Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        assert!(ok, "git {args:?} failed in {}", cwd.display());
+    }
+
+    #[test]
+    fn every_worktree_of_a_repository_shares_one_store() {
+        let base = std::env::temp_dir().join(format!("tr-wt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        git(&["init", "-q", "."], &repo);
+        git(&["config", "user.email", "a@b.c"], &repo);
+        git(&["config", "user.name", "t"], &repo);
+        std::fs::write(repo.join("f"), "x").unwrap();
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-qm", "init"], &repo);
+        git(&["worktree", "add", "-q", "../wt"], &repo);
+
+        let cfg = "[tasks.a]\ncmd = \"true\"";
+        let primary = ws_at(&repo.canonicalize().unwrap(), cfg);
+        let sibling = ws_at(&base.join("wt").canonicalize().unwrap(), cfg);
+
+        // The whole point: results are content-addressed, so two checkouts of one
+        // repository at one commit produce the same keys — and giving each its
+        // own store means paying a cold build for answers already on disk.
+        assert_eq!(
+            primary.store_dir(),
+            sibling.store_dir(),
+            "worktrees of one repository must share a store"
+        );
+        // …and it is not inside either checkout.
+        assert!(!primary.store_dir().starts_with(&repo));
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn an_unrelated_directory_gets_its_own_store() {
+        let a = std::env::temp_dir().join(format!("tr-solo-a-{}", std::process::id()));
+        let b = std::env::temp_dir().join(format!("tr-solo-b-{}", std::process::id()));
+        for d in [&a, &b] {
+            let _ = std::fs::remove_dir_all(d);
+            std::fs::create_dir_all(d).unwrap();
+        }
+        let cfg = "[tasks.a]\ncmd = \"true\"";
+        assert_ne!(ws_at(&a, cfg).store_dir(), ws_at(&b, cfg).store_dir());
+        for d in [&a, &b] {
+            let _ = std::fs::remove_dir_all(d);
+        }
+    }
+
+    #[test]
+    fn an_explicit_cache_dir_wins() {
+        let root = std::env::temp_dir().join(format!("tr-dir-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let ws = ws_at(
+            &root,
+            "[cache]\ndir = \"vendor/cache\"\n\n[tasks.a]\ncmd = \"true\"",
+        );
+        assert_eq!(ws.store_dir(), root.join("vendor/cache"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn a_config_with_no_cache_table_still_has_a_budget() {

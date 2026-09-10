@@ -2,8 +2,9 @@
 id: 72
 title: Sibling worktrees each start with a cold cache
 type: bug
-status: backlog
+status: done
 milestone: v1.3
+assignee: Oddur Sigurdsson
 created: 2026-09-10
 updated: 2026-09-10
 priority: p2
@@ -45,11 +46,25 @@ So the first acceptance criterion is a measurement, not a change.
 
 ## Acceptance criteria
 
-- [ ] Determine whether identical work in two worktrees produces identical keys
-      today; if not, fix the path-dependence first and record what it was
-- [ ] The default store is shared across worktrees of one repository
-- [ ] `[cache] dir` overrides it, and an existing `.turborust/` cache is migrated
+- [x] Determine whether identical work in two worktrees produces identical keys
+      today — they do, so there was no path-dependence to fix
+- [x] The default store is shared across worktrees of one repository
+- [x] `[cache] dir` overrides it, and an existing `.turborust/` cache is migrated
       rather than orphaned
-- [ ] Two worktrees at the same commit: the second `run` is a hit
-- [ ] Concurrent writes from two worktrees do not corrupt a record — this is the
-      first time two turborust processes share a store by default
+- [x] Two worktrees at the same commit: the second `run` is a hit
+- [x] Concurrent writes from two worktrees do not corrupt a record — per-process
+      temp names for records, staged-and-swapped directories for archives
+
+## 2026-09-10
+
+Measured first, as the item required. Keys already match across worktrees — same task, same commit, key b3:791bd455db0e in both the primary checkout and a sibling worktree. So there was no path-dependence to fix; target_dir keys as the enum ('shared'/'split'), cwd is stripped to workspace-relative, and the global hash carries no paths. The only problem was where the store lives.
+
+Cached results now live in a per-user store keyed by 'git rev-parse --git-common-dir', which resolves to the same place from every worktree of a repository and is exactly the identity wanted. Outside git the workspace path is the only identity available, which reproduces the old behaviour. .turborust/ keeps what is genuinely per-checkout: summaries and scratch.
+
+Verified end to end: a sibling worktree now reports 'cache hit ... 1 output(s) restored' where it previously paid a full cold build.
+
+Two processes can now be writing one key at once, so records go to a per-process temp name before the rename, and archives are staged and swapped rather than written in place. A half-written archive under the real name would pass restore's existence check and replay truncated files, which is the failure this had to be closed against before sharing became the default.
+
+Caught by the 0069 tests: staging broke a task that declares outputs and legitimately produces none — the staging directory was never created, so the rename failed and archiving errored. Fixed by creating it up front. Worth recording because the failing test was about dependent invalidation and had nothing on its face to do with archiving.
+
+'clean' now empties the store for every worktree of the repository. It says so rather than printing 'cache cleared'.

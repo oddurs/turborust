@@ -462,6 +462,38 @@ impl Cache {
         Self::with_shared(cache_dir, None, false)
     }
 
+    /// Moves an older per-checkout store into this one, once.
+    ///
+    /// Only when this store is empty: results are addressed by content, so
+    /// merging two populated stores is safe but slow, and doing it silently on
+    /// startup is not the kind of surprise a build tool should hand anyone.
+    pub fn adopt(&self, previous: &Path) -> Result<usize> {
+        let mut moved = 0;
+        for (name, dest) in [("runs", &self.runs), ("artifacts", &self.artifacts)] {
+            let from = previous.join(name);
+            if !from.is_dir() {
+                continue;
+            }
+            for task in std::fs::read_dir(&from)?.flatten() {
+                let target = dest.join(task.file_name());
+                if target.exists() {
+                    continue;
+                }
+                if std::fs::rename(task.path(), &target).is_ok() {
+                    moved += 1;
+                }
+            }
+        }
+        Ok(moved)
+    }
+
+    /// True when nothing has been stored here yet.
+    pub fn is_empty(&self) -> bool {
+        std::fs::read_dir(&self.runs)
+            .map(|mut d| d.next().is_none())
+            .unwrap_or(true)
+    }
+
     /// Sets the byte budget for the local store. `None` keeps everything.
     pub fn with_budget(mut self, budget: Option<u64>) -> Self {
         self.budget = budget;
@@ -620,7 +652,10 @@ impl Cache {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let tmp = path.with_extension("json.tmp");
+        // Unique per process: the store is shared between worktrees now, so two
+        // turborust processes can be writing the same key at the same moment and
+        // a fixed temp name would have them scribbling over each other.
+        let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
         std::fs::write(&tmp, serde_json::to_vec_pretty(record)?)?;
         // Atomic rename: a crash mid-write must not leave a corrupt record that
         // would be read back as a false cache hit.
@@ -667,16 +702,36 @@ impl Cache {
         if total > MAX_ARCHIVE_BYTES {
             return Ok(None);
         }
+        // Staged, then swapped into place. A half-written archive must never be
+        // reachable under the real name: `restore` checks the files exist, and a
+        // truncated copy passes that check while replaying nonsense. With the
+        // store shared between worktrees the window is not hypothetical.
         let dir = self.artifact_dir(task, hash);
-        // Rebuild from scratch: a half-written archive from a previous crash must
-        // not be mistaken for a complete one.
-        let _ = std::fs::remove_dir_all(&dir);
+        let staging = dir.with_file_name(format!(
+            "{}.{}.partial",
+            dir.file_name().unwrap_or_default().to_string_lossy(),
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&staging);
+        // Created up front: a task may declare outputs and legitimately produce
+        // none, and the swap below still has to have something to rename.
+        std::fs::create_dir_all(&staging)?;
         for rel in files {
-            let dest = dir.join(rel);
+            let dest = staging.join(rel);
             if let Some(parent) = dest.parent() {
                 std::fs::create_dir_all(parent)?;
             }
             std::fs::copy(root.join(rel), &dest).with_context(|| format!("archiving {rel}"))?;
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(e) = std::fs::rename(&staging, &dir) {
+            // Another process may have won the race and put an identical archive
+            // there first. Its contents are addressed by the same key, so they
+            // are the same bytes; ours is simply redundant.
+            let _ = std::fs::remove_dir_all(&staging);
+            if !dir.is_dir() {
+                return Err(e).context("publishing archived outputs");
+            }
         }
         Ok(Some(total))
     }
@@ -876,6 +931,71 @@ mod tests {
                 .collect(),
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn a_previous_per_checkout_store_is_adopted_once() {
+        let base = std::env::temp_dir().join(format!("tr-adopt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let (old, new) = (base.join("old"), base.join("new"));
+
+        // A store built the old way, inside the checkout.
+        let (previous, root) = {
+            let cache = Cache::new(&old).unwrap();
+            std::fs::write(base.join("o.bin"), b"out").unwrap();
+            cache.archive("t", "k1", &base, &["o.bin".into()]).unwrap();
+            cache
+                .store(&Record {
+                    task: "t".into(),
+                    fingerprint: Fingerprint {
+                        hash: "k1".into(),
+                        files: BTreeMap::new(),
+                        meta: BTreeMap::new(),
+                    },
+                    exit_code: 0,
+                    duration_ms: 1,
+                    outputs: vec!["o.bin".into()],
+                    archived: true,
+                    output_hash: None,
+                })
+                .unwrap();
+            (old.clone(), base.clone())
+        };
+        let _ = root;
+
+        let shared = Cache::new(&new).unwrap();
+        assert!(shared.is_empty(), "a fresh store starts empty");
+        assert!(shared.adopt(&previous).unwrap() > 0);
+        assert!(
+            shared.load("t", "k1").is_some(),
+            "results should survive the move rather than being orphaned"
+        );
+        // Second time is a no-op: nothing left to take.
+        assert_eq!(shared.adopt(&previous).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn archiving_twice_for_one_key_leaves_a_complete_archive() {
+        // Two worktrees share a store, so two processes can archive the same key
+        // at once. A half-written directory under the real name would pass
+        // restore's existence check and replay truncated files.
+        let base = std::env::temp_dir().join(format!("tr-race-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let cache = Cache::new(&base.join("cache")).unwrap();
+        std::fs::write(base.join("o.bin"), b"payload").unwrap();
+
+        for _ in 0..2 {
+            cache.archive("t", "k1", &base, &["o.bin".into()]).unwrap();
+        }
+        std::fs::remove_file(base.join("o.bin")).unwrap();
+        assert!(cache.restore("t", "k1", &base, &["o.bin".into()]).unwrap());
+        assert_eq!(std::fs::read(base.join("o.bin")).unwrap(), b"payload");
+
+        // A leftover staging directory from a killed process must not be
+        // mistaken for a result.
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

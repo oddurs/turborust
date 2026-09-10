@@ -269,7 +269,19 @@ fn open_cache(ws: &Workspace) -> Result<Cache> {
         if p.is_absolute() { p } else { ws.root.join(p) }
     });
     let budget = turborust::config::parse_size(&ws.config.cache.max_size)?;
-    Ok(Cache::with_shared(&ws.cache_dir(), shared, ws.config.cache.push)?.with_budget(budget))
+    let cache =
+        Cache::with_shared(&ws.store_dir(), shared, ws.config.cache.push)?.with_budget(budget);
+
+    // A checkout that predates the shared store keeps its results rather than
+    // silently starting cold. Once only, and only into an empty store.
+    let previous = ws.cache_dir();
+    if cache.is_empty() && previous.join("runs").is_dir() {
+        match cache.adopt(&previous) {
+            Ok(n) if n > 0 => eprintln!("moved {n} cached task(s) into the shared store"),
+            _ => {}
+        }
+    }
+    Ok(cache)
 }
 
 /// Expands a leading `~`, which is where a shared cache usually lives.
@@ -382,8 +394,14 @@ fn cmd_graph(config: Option<&std::path::Path>, format: &str, with_cache: bool) -
 
 fn cmd_clean(config: Option<&std::path::Path>) -> Result<i32> {
     let ws = load(config)?;
-    Cache::new(&ws.cache_dir())?.clear()?;
-    println!("cache cleared");
+    let store = ws.store_dir();
+    Cache::new(&store)?.clear()?;
+    // Worth naming: the store is shared by every worktree of this repository, so
+    // this is not a local action even though it was run from one checkout.
+    println!(
+        "cleared {} — shared by every worktree of this repository",
+        store.display()
+    );
     Ok(0)
 }
 
@@ -476,7 +494,7 @@ fn cmd_why(config: Option<&std::path::Path>, target: &str) -> Result<i32> {
     let ws = load(config)?;
     let plan = Arc::new(plan::resolve(&ws, &[target.to_string()])?);
     let node = plan.get(target)?.clone();
-    let cache = Arc::new(Cache::new(&ws.cache_dir())?);
+    let cache = Arc::new(Cache::new(&ws.store_dir())?);
     let (engine, _rx) = Engine::new(plan.clone(), cache.clone());
 
     println!("\n  \u{1b}[1m{target}\u{1b}[0m");
