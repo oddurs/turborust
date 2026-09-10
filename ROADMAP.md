@@ -185,7 +185,7 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`#######···` 67% · 2 of 3 done
+`########··` 75% · 3 of 4 done
 
 ### backlog
 
@@ -195,4 +195,5 @@ Good ideas without a date yet.
 
 - [x] `0065` site: redraw illustrations, new type system, fix layout bugs <sup>bug · p2</sup>
 - [x] `0066` plan the next two milestones <sup>chore · p2</sup>
+- [x] `0083` a test that shells out to git can reach the wrong repository <sup>chore · p1</sup>
 
