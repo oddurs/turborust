@@ -52,6 +52,7 @@ turborust init              scaffold a config from your Cargo workspace
 turborust schema            JSON Schema for turborust.toml, for editor completion
 turborust completions <sh>  shell completion script
 turborust man               the man page
+turborust verify [task…]    run tasks twice and prove their outputs match
 turborust cache             what the cache is holding, and what it last dropped
 turborust clean             drop cached task results
 ```
@@ -338,6 +339,68 @@ max_size = "10GiB"                  # local budget; "0" keeps everything
 Any directory both machines can see: a network mount, a synced folder, another
 checkout. A hit in the shared store is copied into the local one on the way past,
 so the round trip happens once.
+
+### Proving the cache is entitled to its answer
+
+A hit is a promise: *this key reproduces these outputs*. That is only sound if
+the task is deterministic, and nothing else in this ecosystem checks. A task
+that embeds a timestamp, iterates a `HashMap`, or bakes in an absolute path will
+have one of its several possible answers served forever, silently.
+
+`0014` fixed the part that could be fixed by construction — undeclared
+environment variables, by filtering the child's environment. The rest cannot be
+prevented, only detected. A content-addressed cache is the only kind that can
+settle it locally, in one command:
+
+```
+$ turborust verify
+
+  ✓ check — deterministic (3 output(s), 2 runs identical)
+  ✗ build NOT DETERMINISTIC
+      ~ target/release/api  b3:5f16c070 -> b3:d33db911
+        differs at offset 0x1f40, 8 byte(s) — a short run: usually an
+        embedded timestamp or build id
+```
+
+Each task runs twice, with its declared outputs deleted first — otherwise a
+second run of an incremental tool is a no-op that reproduces byte-identical
+files and proves nothing. Exit status is non-zero if anything diverged.
+
+The offset is the useful part. A short run at a fixed offset is a stamped field;
+a difference that starts early and never resynchronises is usually ordering;
+different lengths mean the output is genuinely being rebuilt differently.
+
+Nx finds this statistically, by watching results for the same task hash across
+many CI runs. That needs a fleet. This needs two runs.
+
+#### Common causes, and what to do
+
+| Symptom | Usual cause | Fix |
+|---|---|---|
+| Short run, fixed offset, same length | Build timestamp or build id | Set `SOURCE_DATE_EPOCH`, or strip it |
+| Absolute paths in the output | `--remap-path-prefix` not set | Add it, or build from a stable root |
+| Long divergence, same length | `HashMap`/`HashSet` iteration order | Use `BTreeMap`, or sort before writing |
+| Different lengths each run | Parallel codegen writing in completion order | Sort, or pin `codegen-units` |
+| Only under `verify`, never alone | The task reads something it did not declare | Declare it in `env_keys`, or `inputs` |
+
+If a task genuinely cannot be made reproducible, `cache = "disabled"` is the
+honest answer: it will neither be replayed nor treated as stable by anything
+downstream.
+
+#### Checking during ordinary work
+
+```toml
+[cache]
+verify = "off"      # off | sample | always
+```
+
+`sample` re-runs one hit in twenty and compares it against what was about to be
+replayed; `always` checks every hit and is roughly as slow as having no cache. A
+mismatch drops the entry and fails the run, because a record that lies is worse
+than no record.
+
+Off by default: checking costs a rebuild, and that is a price to opt into rather
+than one to discover.
 
 ### What the local store keeps
 

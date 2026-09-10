@@ -642,3 +642,79 @@ async fn an_upstream_with_no_declared_outputs_still_invalidates_by_key() {
         "with no outputs to compare, an upstream re-run must still invalidate"
     );
 }
+
+// ---------------------------------------------------------------------------
+// cairn 0071: a cache hit is a promise that this key reproduces these outputs.
+// Nothing checked it, so a task that bakes in a timestamp or a counter had one
+// of its several possible answers served forever, silently.
+// ---------------------------------------------------------------------------
+
+/// As `run`, but re-checking cache hits against what the task actually produces.
+async fn run_verifying(sandbox: &Sandbox, toml_src: &str, targets: &[&str]) -> i32 {
+    let ws = Workspace {
+        root: sandbox.dir.clone(),
+        config: toml::from_str::<Config>(toml_src).expect("config parses"),
+        source: Some(toml_src.to_string()),
+    };
+    let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+    let plan = Arc::new(plan::resolve(&ws, &targets).expect("plan resolves"));
+    let cache = Arc::new(Cache::new(&ws.cache_dir()).unwrap());
+    let (engine, rx) = Engine::new_verifying(plan, cache, turborust::config::VerifyMode::Always);
+    tokio::spawn(engine::pump_events(engine.state.clone(), rx, false));
+    tokio::time::timeout(Duration::from_secs(30), engine::run_once(engine.clone()))
+        .await
+        .expect("run_once hung")
+        .expect("run_once errored")
+}
+
+/// Its inputs never move, so its key is stable and it will hit — but it writes
+/// something different every time, so the hit is a lie.
+const DRIFTING: &str = r#"
+[tasks.drift]
+cmd = "c=$(cat counter 2>/dev/null || echo 0); expr $c + 1 > counter; cp counter out.txt"
+inputs = ["src.txt"]
+outputs = ["out.txt"]
+"#;
+
+#[tokio::test]
+async fn a_cache_hit_that_does_not_reproduce_its_outputs_fails_the_run() {
+    let sb = Sandbox::new("verify-drift");
+    std::fs::write(sb.path("src.txt"), "steady").unwrap();
+
+    // First run is a miss and stores a result.
+    assert_eq!(run_verifying(&sb, DRIFTING, &["drift"]).await, 0);
+
+    // Second run hits that result, re-runs to check it, and finds it did not
+    // reproduce. That is a failure: the cache was about to hand back an answer
+    // this task does not actually determine.
+    assert_ne!(
+        run_verifying(&sb, DRIFTING, &["drift"]).await,
+        0,
+        "a hit that cannot reproduce its outputs must fail the run"
+    );
+
+    // …and the poisoned entry is gone, so the next run is an honest miss.
+    assert_eq!(
+        run_verifying(&sb, DRIFTING, &["drift"]).await,
+        0,
+        "the bad entry should have been dropped, making this a plain miss"
+    );
+}
+
+/// The same task with verification off keeps hitting, which is the behaviour
+/// everyone gets by default — checking costs a rebuild.
+#[tokio::test]
+async fn without_verification_a_drifting_task_still_hits() {
+    let sb = Sandbox::new("verify-off");
+    std::fs::write(sb.path("src.txt"), "steady").unwrap();
+    assert_eq!(run(&sb, DRIFTING, &["drift"]).await.0, 0);
+    let (code, engine) = run(&sb, DRIFTING, &["drift"]).await;
+    assert_eq!(code, 0);
+    assert!(
+        engine
+            .outcomes()
+            .iter()
+            .any(|o| o.task == "drift" && o.cached),
+        "with verify off the cache is trusted, as documented"
+    );
+}

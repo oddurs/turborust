@@ -301,6 +301,48 @@ pub fn hash_outputs(root: &Path, files: &[String]) -> Option<String> {
     any.then(|| h.finalize().to_hex().to_string())
 }
 
+/// Where two byte streams first differ, and what the difference looks like.
+#[derive(Debug, Serialize, PartialEq, Eq)]
+pub struct Divergence {
+    /// Byte offset of the first difference.
+    pub offset: u64,
+    /// How many bytes differ from there to the end of the shorter run of
+    /// difference — enough to tell a timestamp from a reordered section.
+    pub run: u64,
+    pub left_len: u64,
+    pub right_len: u64,
+}
+
+/// Finds the first byte at which two files differ.
+///
+/// "They differ" is not actionable. "They differ eight bytes in at 0x1f40"
+/// usually is: a short run near a fixed offset is an embedded timestamp or
+/// build id, and a difference that starts early and never resynchronises is
+/// something structural like map iteration order.
+pub fn first_difference(left: &Path, right: &Path) -> Option<Divergence> {
+    let a = std::fs::read(left).ok()?;
+    let b = std::fs::read(right).ok()?;
+    let offset = a
+        .iter()
+        .zip(b.iter())
+        .position(|(x, y)| x != y)
+        .unwrap_or(a.len().min(b.len()));
+    if offset == a.len() && a.len() == b.len() {
+        return None;
+    }
+    let run = a[offset..]
+        .iter()
+        .zip(b[offset..].iter())
+        .take_while(|(x, y)| x != y)
+        .count();
+    Some(Divergence {
+        offset: offset as u64,
+        run: run as u64,
+        left_len: a.len() as u64,
+        right_len: b.len() as u64,
+    })
+}
+
 /// On-disk record of one successful run, addressed by its cache key.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Record {
@@ -803,6 +845,14 @@ impl Cache {
         }
     }
 
+    /// Drops one result, local only. Used when a hit is caught not reproducing
+    /// what it promised: a record that lies is worse than no record.
+    pub fn forget(&self, task: &str, hash: &str) {
+        let _ = std::fs::remove_file(self.record_path(task, hash));
+        let _ = std::fs::remove_file(self.marker_path(task, hash));
+        let _ = std::fs::remove_dir_all(self.artifact_dir(task, hash));
+    }
+
     pub fn clear(&self) -> Result<()> {
         for d in [&self.runs, &self.artifacts] {
             if d.exists() {
@@ -826,6 +876,38 @@ mod tests {
                 .collect(),
             BTreeMap::new(),
         )
+    }
+
+    #[test]
+    fn first_difference_locates_the_byte_and_the_run() {
+        let dir = std::env::temp_dir().join(format!("tr-diff-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |n: &str, b: &[u8]| {
+            std::fs::write(dir.join(n), b).unwrap();
+            dir.join(n)
+        };
+
+        // Identical files have no divergence at all.
+        let a = write("a", b"HEADER-constant-FOOTER");
+        let b = write("b", b"HEADER-constant-FOOTER");
+        assert_eq!(first_difference(&a, &b), None);
+
+        // A stamped field: same length, one short run in the middle. This is the
+        // shape that tells a reader "embedded timestamp" rather than "rewritten".
+        let a = write("c", b"HEADER-000111-FOOTER");
+        let b = write("d", b"HEADER-000222-FOOTER");
+        let d = first_difference(&a, &b).unwrap();
+        assert_eq!(d.offset, 10);
+        assert_eq!(d.run, 3);
+        assert_eq!(d.left_len, d.right_len);
+
+        // Different lengths are reported as such: not a stamped field.
+        let a = write("e", b"short");
+        let b = write("f", b"much longer");
+        let d = first_difference(&a, &b).unwrap();
+        assert_eq!((d.left_len, d.right_len), (5, 11));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
