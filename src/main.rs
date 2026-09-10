@@ -107,6 +107,11 @@ enum Cmd {
     Init,
     /// Delete cached task results.
     Clean,
+    /// What the cache is holding, and what it last dropped.
+    Cache {
+        #[arg(long)]
+        json: bool,
+    },
     /// Print a shell completion script.
     ///
     /// Generated rather than committed, so it cannot drift from the CLI.
@@ -148,6 +153,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             turborust::control::connect(&ws.cache_dir(), &node).await
         }
         Cmd::Clean => cmd_clean(cli.config.as_deref()),
+        Cmd::Cache { json } => cmd_cache(cli.config.as_deref(), json),
         Cmd::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();
             let name = cmd.get_name().to_string();
@@ -250,7 +256,8 @@ fn open_cache(ws: &Workspace) -> Result<Cache> {
         let p = PathBuf::from(shellexpand_home(d));
         if p.is_absolute() { p } else { ws.root.join(p) }
     });
-    Cache::with_shared(&ws.cache_dir(), shared, ws.config.cache.push)
+    let budget = turborust::config::parse_size(&ws.config.cache.max_size)?;
+    Ok(Cache::with_shared(&ws.cache_dir(), shared, ws.config.cache.push)?.with_budget(budget))
 }
 
 /// Expands a leading `~`, which is where a shared cache usually lives.
@@ -366,6 +373,89 @@ fn cmd_clean(config: Option<&std::path::Path>) -> Result<i32> {
     Cache::new(&ws.cache_dir())?.clear()?;
     println!("cache cleared");
     Ok(0)
+}
+
+/// What the store is holding. `clean` deletes; nothing showed.
+fn cmd_cache(config: Option<&std::path::Path>, json: bool) -> Result<i32> {
+    let ws = load(config)?;
+    let cache = open_cache(&ws)?;
+    let stats = cache.stats();
+    let budget = cache.budget();
+    let last = cache.last_sweep();
+
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "schemaVersion": 1,
+                "bytes": stats.bytes,
+                "records": stats.records,
+                "budgetBytes": budget,
+                "byTask": stats.by_task,
+                "sharedBytes": cache.shared_bytes(),
+                "lastSweep": last,
+            }))?
+        );
+        return Ok(0);
+    }
+
+    let cap = match budget {
+        Some(b) => format!(" of {}", human(b)),
+        None => " (no limit)".into(),
+    };
+    println!(
+        "\n  \u{1b}[1m{}\u{1b}[0m{cap}  \u{1b}[2m·  {} result(s)\u{1b}[0m",
+        human(stats.bytes),
+        stats.records
+    );
+
+    // Largest first: the reason to look at this is to find what is costing you.
+    let mut rows: Vec<(&String, &(u64, usize))> = stats.by_task.iter().collect();
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1.0));
+    if rows.is_empty() {
+        println!("\n  \u{1b}[2mnothing cached yet\u{1b}[0m");
+    }
+    for (task, (bytes, count)) in rows {
+        println!(
+            "      {:>9}  {:<28} \u{1b}[2m{} result(s)\u{1b}[0m",
+            human(*bytes),
+            task,
+            count
+        );
+    }
+
+    if let Some(bytes) = cache.shared_bytes() {
+        // Reported, never evicted: a shared store is not this machine's to
+        // garbage-collect.
+        println!(
+            "\n  \u{1b}[2mshared store: {} — not evicted from here\u{1b}[0m",
+            human(bytes)
+        );
+    }
+    if let Some(s) = last {
+        println!(
+            "\n  \u{1b}[2mlast eviction dropped {} result(s), freeing {}\u{1b}[0m",
+            s.dropped,
+            human(s.freed)
+        );
+    }
+    println!();
+    Ok(0)
+}
+
+fn human(n: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut v = n as f64;
+    let mut i = 0;
+    while v >= 1024.0 && i < UNITS.len() - 1 {
+        v /= 1024.0;
+        i += 1;
+    }
+    if i == 0 {
+        format!("{n} B")
+    } else {
+        format!("{v:.1} {}", UNITS[i])
+    }
 }
 
 /// The feature the whole design exists to support: a straight answer to

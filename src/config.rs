@@ -188,6 +188,18 @@ pub struct SharedCache {
     /// Also write this machine's results there. Off unless asked for.
     #[serde(default)]
     pub push: bool,
+    /// Byte budget for the local store: `10GiB`, `500MB`, or `0` to keep
+    /// everything. Least-recently-*used* results are dropped first.
+    ///
+    /// Deliberately not applied to a shared store. A shared cache is not this
+    /// machine's to garbage-collect — evicting from it would delete results
+    /// other people are still reading, on the strength of one machine's budget.
+    #[serde(default = "d_cache_budget")]
+    pub max_size: String,
+}
+
+fn d_cache_budget() -> String {
+    "10GiB".into()
 }
 
 /// The in-browser dev overlay.
@@ -739,6 +751,45 @@ fn find_config() -> Result<PathBuf> {
             bail!("no turborust.toml found in this directory or any parent (try `turborust init`)");
         }
     }
+}
+
+/// Parses `10GiB`, `500MB`, `2048`, or `0` for no limit.
+///
+/// Both the decimal and binary units are accepted and mean what they say: `MB`
+/// is 10^6 and `MiB` is 2^20. Guessing which one someone meant is how a budget
+/// ends up 5% wrong in the direction nobody checked.
+pub fn parse_size(s: &str) -> Result<Option<u64>> {
+    let s = s.trim();
+    if s.is_empty() {
+        bail!("empty size");
+    }
+    let (num, unit) = match s.find(|c: char| c.is_ascii_alphabetic()) {
+        Some(i) => (&s[..i], s[i..].trim()),
+        None => (s, ""),
+    };
+    let n: f64 = num
+        .trim()
+        .parse()
+        .with_context(|| format!("`{s}` is not a valid size"))?;
+    if n < 0.0 {
+        bail!("`{s}` is not a valid size");
+    }
+    let scale = match unit.to_ascii_lowercase().as_str() {
+        "" | "b" => 1.0,
+        "kb" => 1e3,
+        "mb" => 1e6,
+        "gb" => 1e9,
+        "tb" => 1e12,
+        "k" | "kib" => 1024.0,
+        "m" | "mib" => 1024.0 * 1024.0,
+        "g" | "gib" => 1024.0 * 1024.0 * 1024.0,
+        "t" | "tib" => 1024.0 * 1024.0 * 1024.0 * 1024.0,
+        other => bail!("unknown size unit `{other}` in `{s}` (use B, KB, MB, GB, KiB, MiB, GiB)"),
+    };
+    let bytes = (n * scale) as u64;
+    // Zero is "no limit" rather than "keep nothing": a budget of zero bytes
+    // would make every store immediately evict itself, which no one means.
+    Ok((bytes > 0).then_some(bytes))
 }
 
 /// Parses `500ms`, `2s`, `1m`, or a bare number (seconds).
