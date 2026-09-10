@@ -337,7 +337,8 @@ const SWEEP_EVERY: u64 = 8;
 
 /// One result in the store, as the sweeper sees it.
 struct Entry {
-    used_at: std::time::SystemTime,
+    /// Milliseconds since the epoch.
+    used_at: u64,
     bytes: u64,
     record: PathBuf,
     artifacts: PathBuf,
@@ -372,6 +373,19 @@ pub struct Cache {
     budget: Option<u64>,
     /// Bytes written since the last sweep, so the walk is amortised.
     written: std::sync::atomic::AtomicU64,
+}
+
+/// Milliseconds since the epoch.
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// Reads a use marker. `None` when it is absent or not a number.
+fn read_millis(path: &Path) -> Option<u64> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
 }
 
 /// Total size of a directory tree, or 0 if it is not there.
@@ -494,19 +508,26 @@ impl Cache {
         Some(rec)
     }
 
-    /// Records that a result was used, by re-creating a zero-byte marker whose
-    /// mtime is its last-use time.
+    /// Records that a result was used, by writing the time into a marker file
+    /// beside it.
     ///
     /// The record itself is not rewritten: it carries a fingerprint with one
     /// hash per input file, so a large crate closure makes it big, and paying
     /// that write on every cache hit would tax the fast path to speed up
-    /// eviction. A marker costs one inode and an mtime.
+    /// eviction. A marker costs one small write.
+    ///
+    /// The time is the marker's *contents*, not its mtime. Relying on mtime
+    /// failed on Windows: re-creating an already-empty file truncates nothing,
+    /// so NTFS does not treat it as a write and the timestamp never moves —
+    /// every entry then looks equally stale and eviction falls back to write
+    /// order, which is the bug this exists to fix. Content also survives a
+    /// cache directory being copied, which mtime does not reliably do.
     fn touch(&self, task: &str, hash: &str) {
         let path = self.marker_path(task, hash);
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let _ = std::fs::File::create(path);
+        let _ = std::fs::write(path, now_millis().to_string());
     }
 
     fn marker_path(&self, task: &str, hash: &str) -> PathBuf {
@@ -721,14 +742,18 @@ impl Cache {
                     continue;
                 };
                 let record_bytes = rec.metadata().map(|m| m.len()).unwrap_or(0);
-                let artifacts = self.artifacts.join(&task_name).join(&hash);
                 let marker = path.with_extension("used");
+                let artifacts = self.artifacts.join(&task_name).join(&hash);
                 // A record written before markers existed has never been read
                 // since; its own mtime is the best evidence available.
-                let used_at = std::fs::metadata(&marker)
-                    .or_else(|_| rec.metadata())
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::UNIX_EPOCH);
+                let used_at = read_millis(&marker).unwrap_or_else(|| {
+                    rec.metadata()
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0)
+                });
                 out.push(Entry {
                     used_at,
                     bytes: record_bytes + dir_bytes(&artifacts),
@@ -858,7 +883,7 @@ mod tests {
 
         // `aaa` is the oldest by write time and the newest by use. Ordering by
         // write time — which is what this did before — would evict exactly it.
-        std::thread::sleep(std::time::Duration::from_millis(1100));
+        std::thread::sleep(std::time::Duration::from_millis(5));
         assert!(cache.load("t", "aaa").is_some(), "warm-up read");
 
         let budget = 6 * 1024;
@@ -872,6 +897,25 @@ mod tests {
         assert!(cache.stats().bytes <= budget, "store must fit its budget");
         let sweep = cache.last_sweep().expect("an eviction was recorded");
         assert!(sweep.dropped > 0 && sweep.freed > 0);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_second_read_records_a_later_use_than_the_first() {
+        // The direct form of what eviction depends on. Windows caught this the
+        // hard way: when the marker was empty and its mtime was the timestamp,
+        // re-creating it truncated nothing, NTFS did not count it as a write,
+        // and every entry stayed equally stale forever.
+        let (cache, root) = store_with("touch", None, &["aaa"], 16);
+        let marker = cache.marker_path("t", "aaa");
+        let first = read_millis(&marker).expect("storing records a use");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        cache.load("t", "aaa").unwrap();
+        let second = read_millis(&marker).expect("reading records a use");
+        assert!(
+            second > first,
+            "a read must advance the use time ({first} -> {second})"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

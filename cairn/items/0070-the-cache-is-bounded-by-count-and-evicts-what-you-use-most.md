@@ -51,7 +51,8 @@ nothing currently shows.
 
 ## Acceptance criteria
 
-- [x] Eviction is driven by a use timestamp updated on hit, not on write
+- [x] Eviction is driven by a use timestamp updated on hit, not on write —
+      recorded as marker *contents*, because mtime does not move on Windows
 - [x] Total store size stays under `max_size`; a single result larger than the
       budget is recorded but not archived, matching the existing 256 MiB rule
 - [x] *No* shared cache is evicted from — see the note; the plan said to sweep
@@ -72,3 +73,13 @@ Changed my mind on one acceptance criterion. The plan said to apply the budget t
 Hit rate is deliberately not in 'turborust cache'. It needs persisted per-run history, which is 0075's first acceptance criterion; building half of it here would duplicate that work. The command reports size, per-task breakdown, budget, shared-store size, and what the last eviction dropped.
 
 Found while doing this: load_latest scanned every file in the runs directory and parsed the newest by mtime. Markers are touched on every hit, so the newest file is usually a marker — which would have made load_latest return nothing for any task actually being used, silently breaking 'why'. It now filters to .json. Test: a_use_marker_does_not_look_like_a_record.
+
+## 2026-09-10
+
+Windows CI caught a real bug the other two platforms hid.
+
+The first design made the use marker a zero-byte file and took its mtime as the use time. On Windows that never advances: re-creating an already-empty file truncates nothing, so NTFS does not treat it as a write and the timestamp stays put. Every entry then looks equally stale, eviction falls back to write order, and the bug this item exists to fix comes straight back — silently, and only on Windows.
+
+The time is now the marker's *contents* (epoch millis), written with fs::write, which is a real write everywhere. It also survives a cache directory being copied, which mtime does not reliably do, and it made the test 25x faster because it no longer has to sleep past filesystem granularity.
+
+Test a_second_read_records_a_later_use_than_the_first pins the property directly rather than only through eviction, so the next platform that does something surprising with timestamps fails on the specific claim.
