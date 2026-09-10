@@ -133,9 +133,35 @@ Documented, tested, and safe to depend on.
 - [x] `0020` on-busy-update: restart is the only policy <sup>feature · p3</sup>
 - [x] `0021` No passthrough args on run <sup>feature · p3</sup>
 
+## v1.3 — A cache you can audit
+
+`··········` 0% · 0 of 4 done · due 2027-09-01
+
+The cache is the load-bearing claim in this project. `why` explains it, the
+
+### backlog
+
+- [ ] `0069` Downstream rebuilds when an upstream re-runs with identical output <sup>bug · p1</sup>
+- [ ] `0070` The cache is bounded by count, and evicts what you use most <sup>bug · p1</sup>
+- [ ] `0071` Nothing proves a task is deterministic <sup>feature · p1</sup>
+- [ ] `0072` Sibling worktrees each start with a cold cache <sup>bug · p2</sup>
+
+## v1.4 — The loop keeps up
+
+`··········` 0% · 0 of 4 done · due 2027-11-01
+
+The dev loop moved while this tool was being built.
+
+### backlog
+
+- [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
+- [ ] `0074` Test failures are invisible where every other failure is visible <sup>feature · p1</sup>
+- [ ] `0075` doctor advises but never measures <sup>feature · p1</sup>
+- [ ] `0078` Machine-readable output is not a stable contract <sup>chore · p2</sup>
+
 ## later — Not now, not never
 
-`########··` 80% · 8 of 10 done
+`#######···` 67% · 8 of 12 done
 
 Good ideas without a date yet.
 
@@ -143,6 +169,8 @@ Good ideas without a date yet.
 
 - [ ] `0061` Dynamic completion for node names <sup>feature · p3</sup>
 - [ ] `0062` pty output capture is unverified on Windows <sup>bug · p2</sup>
+- [ ] `0076` Hash a node's inputs only when the graph needs its key <sup>chore · p3</sup>
+- [ ] `0077` An MCP server, once the JSON contract is stable <sup>feature · p3</sup>
 
 ### done
 
@@ -157,7 +185,7 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`#####·····` 50% · 1 of 2 done
+`#######···` 67% · 2 of 3 done
 
 ### backlog
 
@@ -166,4 +194,5 @@ Good ideas without a date yet.
 ### done
 
 - [x] `0065` site: redraw illustrations, new type system, fix layout bugs <sup>bug · p2</sup>
+- [x] `0066` plan the next two milestones <sup>chore · p2</sup>
 
