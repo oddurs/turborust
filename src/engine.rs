@@ -42,9 +42,14 @@ pub struct Engine {
     pub cache: Arc<Cache>,
     pub events_tx: mpsc::UnboundedSender<ProcEvent>,
     pub reload_tx: broadcast::Sender<String>,
-    /// Fingerprints computed this session, so a downstream task's cache key
-    /// includes its upstreams' keys.
-    hashes: Mutex<BTreeMap<String, String>>,
+    /// What each completed node contributes to its dependents' cache keys.
+    ///
+    /// `out:<hash>` when the node declared outputs and produced some — then a
+    /// dependent rebuilds because its upstream produced something *different*,
+    /// not merely because it ran. `key:<hash>` otherwise: a task that declared
+    /// no outputs has nothing observable to offer, so its own key is the only
+    /// honest proxy for it.
+    stamps: Mutex<BTreeMap<String, String>>,
     /// Set by `run --force`. Lives here rather than on the call because task
     /// execution is driven by supervisors, which have no argument to thread.
     force: AtomicBool,
@@ -110,7 +115,7 @@ impl Engine {
             cache,
             events_tx,
             reload_tx,
-            hashes: Mutex::new(BTreeMap::new()),
+            stamps: Mutex::new(BTreeMap::new()),
             force: AtomicBool::new(false),
             passthrough: Mutex::new(None),
             handles: Mutex::new(BTreeMap::new()),
@@ -270,17 +275,46 @@ impl Engine {
         }
         // Workspace-wide inputs: the toolchain, the config, the lockfile.
         meta.extend(self.plan.global.meta());
-        // Upstream keys fold in, so a change deep in the graph reaches every
+        // Upstream stamps fold in, so a change deep in the graph reaches every
         // downstream node without re-hashing its files.
-        let hashes = self.hashes.lock().unwrap();
+        let stamps = self.stamps.lock().unwrap();
         for dep in &node.depends_on {
-            if let Some(h) = hashes.get(dep) {
+            if let Some(h) = stamps.get(dep) {
                 meta.insert(format!("dep:{dep}"), h.clone());
             }
         }
-        drop(hashes);
+        drop(stamps);
 
         Ok(cache::combine(files, meta))
+    }
+
+    fn stamp(&self, name: &str, value: String) {
+        self.stamps.lock().unwrap().insert(name.to_string(), value);
+    }
+
+    /// Resolves each dependency's stamp from the cache, for callers that inspect
+    /// a key without running anything.
+    ///
+    /// Without this `why` omits every `dep:` entry and reports a key that a real
+    /// run would never produce — which was true before dependents keyed on
+    /// outputs, and is worse now that the stamp is the interesting part.
+    pub fn seed_stamps_from_cache(&self, node: &Node) {
+        for dep in &node.depends_on {
+            let Ok(upstream) = self.plan.get(dep) else {
+                continue;
+            };
+            let Some(rec) = self.cache.load_latest(dep) else {
+                continue;
+            };
+            let stamp = rec
+                .output_hash
+                .clone()
+                .or_else(|| cache::hash_outputs(&self.plan.root, &rec.outputs))
+                .map(|h| format!("out:{h}"))
+                .unwrap_or_else(|| format!("key:{}", rec.fingerprint.hash));
+            self.stamp(dep, stamp);
+            self.seed_stamps_from_cache(upstream);
+        }
     }
 
     /// Everything this run did, for `--summarize`.
@@ -408,10 +442,9 @@ impl Engine {
             Some(self.fingerprint(&node)?)
         };
         if let Some(fp) = &fp {
-            self.hashes
-                .lock()
-                .unwrap()
-                .insert(name.to_string(), fp.hash.clone());
+            // Seeded with the key so a dependent always has something to fold in;
+            // replaced by an output stamp below if this node produces any.
+            self.stamp(name, format!("key:{}", fp.hash));
         }
 
         let force = force || self.force.load(Ordering::Relaxed);
@@ -439,6 +472,15 @@ impl Engine {
                 self.outputs_present(&node)
             };
             if replayed {
+                // The replayed outputs are what dependents key on, exactly as
+                // they would after a real run.
+                if let Some(h) = rec
+                    .output_hash
+                    .clone()
+                    .or_else(|| cache::hash_outputs(&self.plan.root, &rec.outputs))
+                {
+                    self.stamp(name, format!("out:{h}"));
+                }
                 let d = Duration::from_millis(rec.duration_ms);
                 self.record_build(name, true, d, fp, Vec::new());
                 self.set(
@@ -520,6 +562,10 @@ impl Engine {
             );
             if let Some(fp) = &fp {
                 let (outputs, archived) = self.capture_outputs(&node, name, &fp.hash);
+                let output_hash = cache::hash_outputs(&self.plan.root, &outputs);
+                if let Some(h) = &output_hash {
+                    self.stamp(name, format!("out:{h}"));
+                }
                 let _ = self.cache.store(&Record {
                     task: name.to_string(),
                     fingerprint: fp.clone(),
@@ -527,6 +573,7 @@ impl Engine {
                     duration_ms: duration.as_millis() as u64,
                     outputs,
                     archived,
+                    output_hash,
                 });
             }
         } else {

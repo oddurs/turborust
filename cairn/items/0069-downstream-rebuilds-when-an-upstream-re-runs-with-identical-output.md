@@ -2,8 +2,9 @@
 id: 69
 title: Downstream rebuilds when an upstream re-runs with identical output
 type: bug
-status: backlog
+status: done
 milestone: v1.3
+assignee: Oddur Sigurdsson
 created: 2026-09-10
 updated: 2026-09-10
 priority: p1
@@ -52,11 +53,21 @@ more place, which is an argument for documenting it harder, not for declining it
 
 ## Acceptance criteria
 
-- [ ] A downstream node is served from cache when an upstream re-runs and its
+- [x] A downstream node is served from cache when an upstream re-runs and its
       declared outputs hash the same
-- [ ] A downstream node rebuilds when an upstream's declared outputs change
-- [ ] An upstream with no declared outputs keeps today's behaviour exactly
-- [ ] `why` names which of the two rules applied, and for tasks keyed on outputs
+- [x] A downstream node rebuilds when an upstream's declared outputs change
+- [x] An upstream with no declared outputs keeps today's behaviour exactly
+- [x] `why` names which of the two rules applied, and for tasks keyed on outputs
       shows the upstream output hash rather than the upstream key
-- [ ] The `outputs`-completeness contract is written down in the README next to
+- [x] The `outputs`-completeness contract is written down in the README next to
       the cache-key description
+
+## 2026-09-10
+
+Implemented. Dependents now fold in an upstream *stamp* rather than an upstream key: 'out:<hash>' when the upstream declared outputs and produced some, 'key:<hash>' otherwise.
+
+The stamp is hashed from the outputs' contents and stored on the Record, so a cache hit does not re-read the files; records written before this change carry no output_hash and fall back to hashing on demand.
+
+An upstream that declares outputs but produces none falls back to keying. Hashing the empty set would give every such task the same stamp, so a build that exits 0 without writing what it promised would tell its dependents nothing changed — which is the one case where they must rebuild.
+
+Found while doing this: 'why' never populated dep: entries at all, because it builds an Engine and runs nothing. It was reporting a key no real run would produce for any node with dependencies. Fixed with seed_stamps_from_cache, which resolves each dependency's stamp from its latest record.

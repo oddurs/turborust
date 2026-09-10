@@ -521,3 +521,124 @@ async fn continue_on_a_clean_run_is_a_no_op() {
     .await;
     assert_eq!(code, 0);
 }
+
+// ---------------------------------------------------------------------------
+// cairn 0069: a dependent used to key on its upstream's *key*, so an upstream
+// that re-ran always invalidated everything below it — even when it produced a
+// byte-identical artifact. These pin the two halves of the rule.
+// ---------------------------------------------------------------------------
+
+/// Whether a task was served from cache on the most recent run.
+fn was_cached(engine: &Engine, task: &str) -> bool {
+    engine
+        .outcomes()
+        .iter()
+        .find(|o| o.task == task)
+        .unwrap_or_else(|| panic!("`{task}` did not run"))
+        .cached
+}
+
+/// `gen` copies its input to an output; `use` consumes that output. Editing the
+/// input in a way that leaves the output identical must not rebuild `use`.
+const STABLE_OUTPUT: &str = r#"
+[tasks.gen]
+cmd = "printf 'constant' > out.txt"
+inputs = ["src.txt"]
+outputs = ["out.txt"]
+
+[tasks.use]
+depends_on = ["gen"]
+cmd = "true"
+inputs = ["out.txt"]
+outputs = ["used.txt"]
+"#;
+
+#[tokio::test]
+async fn an_upstream_that_reruns_with_identical_output_does_not_rebuild_its_dependent() {
+    let sb = Sandbox::new("dep-outputs-stable");
+    std::fs::write(sb.path("src.txt"), "one").unwrap();
+
+    let (code, _) = run(&sb, STABLE_OUTPUT, &["use"]).await;
+    assert_eq!(code, 0);
+
+    // `gen`'s input changed, so `gen` must re-run — but it writes the same bytes,
+    // so `use` has nothing new to consume.
+    std::fs::write(sb.path("src.txt"), "two").unwrap();
+    let (code, engine) = run(&sb, STABLE_OUTPUT, &["use"]).await;
+    assert_eq!(code, 0);
+
+    assert!(
+        !was_cached(&engine, "gen"),
+        "`gen`'s own inputs changed, so it must re-run"
+    );
+    assert!(
+        was_cached(&engine, "use"),
+        "`gen` produced identical outputs, so `use` had nothing to rebuild for"
+    );
+}
+
+/// The same shape, except `gen`'s output tracks its input.
+const CHANGING_OUTPUT: &str = r#"
+[tasks.gen]
+cmd = "cp src.txt out.txt"
+inputs = ["src.txt"]
+outputs = ["out.txt"]
+
+[tasks.use]
+depends_on = ["gen"]
+cmd = "true"
+inputs = ["out.txt"]
+outputs = ["used.txt"]
+"#;
+
+#[tokio::test]
+async fn an_upstream_whose_outputs_change_still_rebuilds_its_dependent() {
+    let sb = Sandbox::new("dep-outputs-changing");
+    std::fs::write(sb.path("src.txt"), "one").unwrap();
+
+    let (code, _) = run(&sb, CHANGING_OUTPUT, &["use"]).await;
+    assert_eq!(code, 0);
+
+    std::fs::write(sb.path("src.txt"), "two").unwrap();
+    let (code, engine) = run(&sb, CHANGING_OUTPUT, &["use"]).await;
+    assert_eq!(code, 0);
+    assert!(!was_cached(&engine, "gen"));
+    assert!(
+        !was_cached(&engine, "use"),
+        "`gen` produced different bytes, so `use` must rebuild"
+    );
+}
+
+/// An upstream that declares no outputs has nothing observable to key on, so its
+/// own key stays the proxy — which is today's behaviour, and must not regress.
+const NO_OUTPUTS: &str = r#"
+[tasks.gen]
+cmd = "true"
+inputs = ["src.txt"]
+
+[tasks.use]
+depends_on = ["gen"]
+cmd = "true"
+inputs = ["other.txt"]
+outputs = ["used.txt"]
+"#;
+
+#[tokio::test]
+async fn an_upstream_with_no_declared_outputs_still_invalidates_by_key() {
+    let sb = Sandbox::new("dep-no-outputs");
+    std::fs::write(sb.path("src.txt"), "one").unwrap();
+    std::fs::write(sb.path("other.txt"), "steady").unwrap();
+
+    let (code, _) = run(&sb, NO_OUTPUTS, &["use"]).await;
+    assert_eq!(code, 0);
+
+    // Only `gen`'s input moves. `use`'s own inputs are untouched, so the sole
+    // reason it may rebuild is the upstream key folded into its own.
+    std::fs::write(sb.path("src.txt"), "two").unwrap();
+    let (code, engine) = run(&sb, NO_OUTPUTS, &["use"]).await;
+    assert_eq!(code, 0);
+    assert!(
+        !was_cached(&engine, "use"),
+        "with no outputs to compare, an upstream re-run must still invalidate"
+    );
+}
