@@ -462,12 +462,26 @@ pub struct Health {
     /// port worth probing — `trunk`, `cargo leptos watch`, migration tools.
     /// Matched against ANSI-stripped output.
     pub log: Option<String>,
+    /// A command that exits 0 when the node is ready — `pg_isready`,
+    /// `redis-cli ping`. Run with the node's environment and working directory.
+    ///
+    /// For the processes whose port opens before they can do anything: Postgres
+    /// accepts a connection while it is still answering "the database system is
+    /// starting up", so `tcp` passes too early and `cmd` does not.
+    pub cmd: Option<String>,
+    /// How long one attempt of `cmd` may take before it counts as a failure.
+    #[serde(default = "d_probe_timeout")]
+    pub timeout: String,
     #[serde(default = "d_health_interval")]
     pub interval: String,
 }
 
 fn d_health_interval() -> String {
     "300ms".into()
+}
+
+pub fn d_probe_timeout() -> String {
+    "5s".into()
 }
 
 /// Who is responsible for rebuilding a service.

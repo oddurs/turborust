@@ -939,6 +939,141 @@ async fn a_rebuild_announced_while_startup_is_being_confirmed_is_not_missed() {
     h.shutdown().await;
 }
 
+// ------------------------------------------------------------- health.cmd --
+// Cover for cairn 0091: readiness by command, for processes whose port opens
+// before they can do anything (Postgres answering "the database system is
+// starting up").
+
+impl Harness {
+    fn logs_of(&self, node: &str) -> String {
+        self.engine
+            .state
+            .lock()
+            .unwrap()
+            .logs
+            .view(Some(node))
+            .iter()
+            .map(|l| turborust::proc::strip_ansi(&l.text))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+#[tokio::test]
+async fn a_command_probe_holds_readiness_after_the_port_opens() {
+    // The port answers from the start, as Postgres's does; only the command
+    // knows the process is not ready yet.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let mut h = Harness::start(
+        "probe-cmd",
+        &format!(
+            r#"
+            [services.db]
+            cmd = "sleep 1.2; touch accepting; sleep 30"
+            health = {{ tcp = {port}, cmd = "test -f accepting", interval = "50ms" }}
+            restart = "never"
+            "#
+        ),
+        &["db"],
+    );
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert!(
+        matches!(h.status("db"), Status::Starting),
+        "the port was open but the command had not passed; was {:?}",
+        h.status("db")
+    );
+    h.wait_for("db healthy", |st| {
+        matches!(st.nodes["db"].status, Status::Healthy)
+    })
+    .await;
+    drop(listener);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_command_probe_runs_with_the_nodes_environment() {
+    let mut h = Harness::start(
+        "probe-env",
+        r#"
+        [services.with]
+        cmd = "sleep 30"
+        env = { PROBE_ME = "yes" }
+        health = { cmd = "test \"$PROBE_ME\" = yes", interval = "50ms" }
+        restart = "never"
+
+        [services.without]
+        cmd = "sleep 30"
+        health = { cmd = "test \"$PROBE_ME\" = yes", interval = "50ms" }
+        ready_timeout = "800ms"
+        restart = "never"
+        "#,
+        &["with", "without"],
+    );
+    h.wait_for("with healthy, without unhealthy", |st| {
+        matches!(st.nodes["with"].status, Status::Healthy)
+            && matches!(st.nodes["without"].status, Status::Unhealthy)
+    })
+    .await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_probe_that_hangs_is_cut_off_and_reported() {
+    let mut h = Harness::start(
+        "probe-hang",
+        r#"
+        [services.db]
+        cmd = "sleep 30"
+        health = { cmd = "sleep 60", timeout = "200ms", interval = "50ms" }
+        ready_timeout = "1s"
+        restart = "never"
+        "#,
+        &["db"],
+    );
+    let began = std::time::Instant::now();
+    h.wait_for("db unhealthy", |st| {
+        matches!(st.nodes["db"].status, Status::Unhealthy)
+    })
+    .await;
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "a hanging probe held up the supervisor: {:?}",
+        began.elapsed()
+    );
+    assert!(
+        h.logs_of("db").contains("did not finish within"),
+        "{}",
+        h.logs_of("db")
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_failing_probe_says_what_it_said() {
+    let mut h = Harness::start(
+        "probe-say",
+        r#"
+        [services.db]
+        cmd = "sleep 30"
+        health = { cmd = "echo 'no response' >&2; exit 2", interval = "50ms" }
+        ready_timeout = "500ms"
+        restart = "never"
+        "#,
+        &["db"],
+    );
+    h.wait_for("db unhealthy", |st| {
+        matches!(st.nodes["db"].status, Status::Unhealthy)
+    })
+    .await;
+    let logs = h.logs_of("db");
+    assert!(
+        logs.contains("last readiness attempt:") && logs.contains("(exit 2): no response"),
+        "{logs}"
+    );
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_nested_workspace_is_not_restarted_by_being_watched() {
     // Cover for cairn 0088: on Linux, watching a workspace laid out like a real

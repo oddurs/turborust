@@ -62,6 +62,7 @@ phantom.
 health = { tcp = 8788 }
 health = { http = "http://127.0.0.1:8788/healthz" }
 health = { log = "Serving at" }
+health = { cmd = "pg_isready -h 127.0.0.1" }
 ```
 
 Every probe a node declares must pass, so `{ tcp = 8788, log = "ready" }` means

@@ -72,6 +72,13 @@
     "Health": {
       "type": "object",
       "properties": {
+        "cmd": {
+          "description": "A command that exits 0 when the node is ready — `pg_isready`,\n`redis-cli ping`. Run with the node's environment and working directory.\n\nFor the processes whose port opens before they can do anything: Postgres\naccepts a connection while it is still answering \"the database system is\nstarting up\", so `tcp` passes too early and `cmd` does not.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "http": {
           "description": "HTTP GET; any 2xx/3xx counts as healthy.",
           "type": [
@@ -99,6 +106,11 @@
           "format": "uint16",
           "maximum": 65535,
           "minimum": 0
+        },
+        "timeout": {
+          "description": "How long one attempt of `cmd` may take before it counts as a failure.",
+          "type": "string",
+          "default": "5s"
         }
       },
       "additionalProperties": false

@@ -252,6 +252,13 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             bail!("service `{name}` has no command");
         }
         check_reload(name, s)?;
+        if let Some(h) = &s.health {
+            // Parsed here rather than where they are used, where a typo quietly
+            // fell back to a default (cairn 0086's rule, applied to probes).
+            for (key, value) in [("interval", &h.interval), ("timeout", &h.timeout)] {
+                pd(value).map_err(|e| anyhow::anyhow!("service `{name}`: health.{key}: {e}"))?;
+            }
+        }
 
         // A declared port with no explicit probe is a readiness signal in itself.
         let health = s
@@ -262,6 +269,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
                     tcp: Some(p),
                     http: None,
                     log: None,
+                    cmd: None,
+                    timeout: crate::config::d_probe_timeout(),
                     interval: "300ms".to_string(),
                 })
             })
@@ -273,6 +282,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
                     tcp: Some(sv.port),
                     http: None,
                     log: None,
+                    cmd: None,
+                    timeout: crate::config::d_probe_timeout(),
                     interval: "150ms".to_string(),
                 })
             });
@@ -544,6 +555,17 @@ mod tests {
             source: None,
         };
         assert!(resolve(&ws, &["a".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn a_probe_duration_that_does_not_parse_is_refused() {
+        // Cover for cairn 0091: these used to fall back to a default quietly.
+        for (key, bad) in [("interval", "fast"), ("timeout", "-1s")] {
+            let e = plan_err(&format!(
+                "[services.db]\ncmd = \"x\"\nhealth = {{ cmd = \"true\", {key} = \"{bad}\" }}\n"
+            ));
+            assert!(e.contains(&format!("health.{key}")), "{e}");
+        }
     }
 
     // Cover for cairn 0073: each of these used to be a config that looked
