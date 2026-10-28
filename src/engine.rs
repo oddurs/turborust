@@ -1750,10 +1750,27 @@ pub fn spawn_watch_dispatch(
         return Ok(());
     }
 
+    let mut warnings = watcher.take_warnings();
     tokio::spawn(async move {
+        let mut said: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         // `watcher` must be moved whole: it carries the guard that keeps the OS
         // watch alive. `Watcher::recv` exists to make that unavoidable.
-        while let Some(paths) = watcher.recv().await {
+        loop {
+            let paths = tokio::select! {
+                paths = watcher.recv() => match paths {
+                    Some(paths) => paths,
+                    None => return,
+                },
+                // A watch that stopped covering part of the tree, said where both
+                // the dashboard and `--no-tui` show it — once per message, since
+                // the limit error repeats for every directory that cannot be added.
+                Some(warning) = warnings.recv() => {
+                    if said.insert(warning.clone()) {
+                        engine.log("watch", format!("warning: {warning}"));
+                    }
+                    continue;
+                }
+            };
             if engine.state.lock().unwrap().shutting_down {
                 return;
             }
