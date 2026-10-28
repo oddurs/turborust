@@ -57,6 +57,20 @@ turborust cache             what the cache is holding, and what it last dropped
 turborust clean             drop cached task results
 ```
 
+### Stopping
+
+ctrl-c, SIGTERM (`docker stop`, systemd, a cancelled CI job) and SIGHUP (a closed
+terminal) all mean the same thing: stop every node in reverse dependency order,
+each within its `stop_timeout`, SIGTERM then SIGKILL to its whole process group.
+Send any of them again to stop waiting and kill everything at once.
+
+`up` exits 0 after a requested stop. `run` exits 128 + the signal number — 130
+for ctrl-c, 143 for SIGTERM — so an interrupted run never reads as a passing one.
+
+SIGKILL to turborust itself cannot be handled by any process, and a child that
+ignores SIGHUP can outlive it. Under systemd the default `KillMode=control-group`
+cleans that up; in a container, the container's own teardown does.
+
 ### `why` is the point
 
 ```

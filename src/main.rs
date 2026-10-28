@@ -665,7 +665,17 @@ async fn cmd_run(
     ));
     let started = turborust::summary::now_secs();
     let began = std::time::Instant::now();
-    let code = engine::run_once_with(engine.clone(), output.keep_going).await?;
+    let mut stop = stop_requests(&engine)?;
+    let code = engine::run_once_until(engine.clone(), output.keep_going, async {
+        let request = stop.requested().await;
+        eprintln!(
+            "\nturborust: {} — stopping; send it again to force",
+            request.name()
+        );
+        // Never success: an interrupted run did not pass.
+        request.exit_code()
+    })
+    .await?;
 
     if output.summarize {
         let summary = turborust::summary::RunSummary {
@@ -700,6 +710,9 @@ async fn cmd_up(
 
     tokio::spawn(engine::pump_events(engine.state.clone(), rx, no_tui));
 
+    // Before anything is spawned, so no child is ever running while a stop
+    // request would still kill turborust outright.
+    let mut stop = stop_requests(&engine)?;
     let (wires, supervisors) = engine::spawn_supervisors(engine.clone());
     let wires = Arc::new(wires);
 
@@ -770,16 +783,44 @@ async fn cmd_up(
         }
     });
 
-    if no_tui {
+    let ended = if no_tui {
         println!("turborust: {} node(s) — ctrl-c to stop", plan.order.len());
-        tokio::signal::ctrl_c().await.ok();
+        Ok(Some(stop.requested().await))
     } else {
-        tui::run(engine.clone(), wires.clone()).await?;
+        tui::run(engine.clone(), wires.clone(), stop.requested()).await
+    };
+    if let Ok(Some(request)) = &ended {
+        eprintln!(
+            "\nturborust: {} — stopping; send it again to force",
+            request.name()
+        );
     }
 
+    // Also when the dashboard failed: the supervisors are already running, and
+    // returning the error first would leave their children behind.
     engine::shutdown(&engine, &wires, supervisors).await;
     let _ = std::fs::remove_file(&socket);
-    Ok(0)
+    // A requested stop is a clean one, as with `docker compose`.
+    ended.map(|_| 0)
+}
+
+/// Stop requests for a command that has children to look after.
+///
+/// The first is the caller's to act on with an orderly shutdown. Any request
+/// after a shutdown has begun kills every child's process tree and exits:
+/// whoever sends it has decided not to wait, and exiting without the kill is
+/// how children were orphaned (cairn 0085).
+fn stop_requests(engine: &Arc<Engine>) -> Result<turborust::signals::Stop> {
+    let signals = turborust::signals::Signals::install().context("installing signal handlers")?;
+    let engine = engine.clone();
+    Ok(turborust::signals::watch(signals, move |request| {
+        eprintln!(
+            "\nturborust: {} again — killing every process now",
+            request.name()
+        );
+        engine.kill_all();
+        std::process::exit(request.exit_code());
+    }))
 }
 
 fn cmd_init() -> Result<i32> {
@@ -960,7 +1001,19 @@ async fn cmd_verify(
 
     // Bring dependencies up first, so each pair of runs differs only in when it
     // happened.
-    let code = turborust::engine::run_once(engine.clone()).await?;
+    // Any request once this first build is done goes straight to the kill: the
+    // comparison runs below spawn children too, and none of them may outlive us.
+    let mut stop = stop_requests(&engine)?;
+    let stopped = std::cell::Cell::new(false);
+    let code = turborust::engine::run_once_until(engine.clone(), false, async {
+        let request = stop.requested().await;
+        stopped.set(true);
+        request.exit_code()
+    })
+    .await?;
+    if stopped.get() {
+        return Ok(code);
+    }
     if code != 0 {
         eprintln!("\n  the plan does not build, so there is nothing to verify.\n");
         return Ok(code);
