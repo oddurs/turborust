@@ -145,7 +145,7 @@ The cache is the load-bearing claim in this project. `why` explains it, the
 
 ## v1.4 — The loop keeps up
 
-`##········` 20% · 1 of 5 done · due 2027-11-01
+`######····` 56% · 5 of 9 done · due 2027-11-01
 
 The dev loop moved while this tool was being built.
 
@@ -162,6 +162,10 @@ The dev loop moved while this tool was being built.
 ### done
 
 - [x] `0085` A stop request from outside kills turborust and orphans its children <sup>bug · p0</sup>
+- [x] `0086` A config mistake runs quietly instead of being refused <sup>bug · p0</sup>
+- [x] `0087` turborust cannot be released or installed safely <sup>chore · p1</sup>
+- [x] `0088` On Linux, a nested workspace restarts its services forever <sup>bug · p0</sup>
+- [x] `0089` A file-watch limit silently stops rebuilds <sup>bug · p1</sup>
 
 ## later — Not now, not never
 

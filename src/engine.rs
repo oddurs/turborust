@@ -720,6 +720,22 @@ impl Engine {
         })
     }
 
+    /// A node failed before it had a process to fail with — a spawn that did
+    /// not happen, a fingerprint that could not be taken.
+    ///
+    /// The reporter only shows a node's output once that node finishes, and
+    /// "finishes" used to mean a process exiting. With no process there was no
+    /// exit, so the reason sat in a buffer nobody flushed: `run` exited 1 and
+    /// printed nothing (cairn 0086).
+    fn fail(&self, name: &str, error: String, code: i32) {
+        self.log(name, error.clone());
+        let _ = self.events_tx.send(ProcEvent::Failed {
+            proc: name.to_string(),
+            error,
+        });
+        self.set(name, Status::Failed(code));
+    }
+
     fn log(&self, proc: &str, text: String) {
         let _ = self.events_tx.send(ProcEvent::Line(crate::proc::LogLine {
             seq: crate::proc::next_seq(),
@@ -1030,8 +1046,7 @@ async fn supervise(
             let outcome = match engine.run_task(&name, false).await {
                 Ok(o) => o,
                 Err(e) => {
-                    engine.log(&name, format!("error: {e}"));
-                    engine.set(&name, Status::Failed(1));
+                    engine.fail(&name, format!("error: {e:#}"), 1);
                     TaskOutcome {
                         cached: false,
                         code: 1,
@@ -1095,8 +1110,7 @@ async fn supervise(
         ) {
             Ok(h) => h,
             Err(e) => {
-                engine.log(&name, format!("spawn failed: {e}"));
-                engine.set(&name, Status::Failed(127));
+                engine.fail(&name, format!("spawn failed: {e:#}"), 127);
                 if node.restart == crate::config::RestartPolicy::Never {
                     return;
                 }
@@ -1736,10 +1750,27 @@ pub fn spawn_watch_dispatch(
         return Ok(());
     }
 
+    let mut warnings = watcher.take_warnings();
     tokio::spawn(async move {
+        let mut said: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         // `watcher` must be moved whole: it carries the guard that keeps the OS
         // watch alive. `Watcher::recv` exists to make that unavoidable.
-        while let Some(paths) = watcher.recv().await {
+        loop {
+            let paths = tokio::select! {
+                paths = watcher.recv() => match paths {
+                    Some(paths) => paths,
+                    None => return,
+                },
+                // A watch that stopped covering part of the tree, said where both
+                // the dashboard and `--no-tui` show it — once per message, since
+                // the limit error repeats for every directory that cannot be added.
+                Some(warning) = warnings.recv() => {
+                    if said.insert(warning.clone()) {
+                        engine.log("watch", format!("warning: {warning}"));
+                    }
+                    continue;
+                }
+            };
             if engine.state.lock().unwrap().shutting_down {
                 return;
             }
