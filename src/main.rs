@@ -353,6 +353,15 @@ fn cmd_plan(config: Option<&std::path::Path>) -> Result<i32> {
         if !n.depends_on.is_empty() {
             println!("      after    {}", n.depends_on.join(", "));
         }
+        // Its edges behave differently: down on its own rebuild, never restarted
+        // for a change, so worth seeing before it surprises anyone.
+        if n.reload == turborust::config::Reload::SelfManaged {
+            let how = match &n.reloading {
+                Some(p) => format!("out of ready on \"{p}\""),
+                None => "\u{1b}[2mno `reloading` probe, so rebuilds are invisible\u{1b}[0m".into(),
+            };
+            println!("      reloads  itself — {how}");
+        }
         let globs = if n.kind == Kind::Task {
             &n.inputs
         } else {

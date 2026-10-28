@@ -213,8 +213,9 @@ async fn a_service_that_never_announces_never_becomes_healthy() {
     );
     tokio::time::sleep(Duration::from_millis(1600)).await;
     assert!(
-        !matches!(h.status("quiet"), Status::Healthy),
-        "a probe that never matched must not report healthy"
+        matches!(h.status("quiet"), Status::Unhealthy),
+        "a probe that gave up must read unhealthy, not healthy and not starting; was {:?}",
+        h.status("quiet")
     );
     h.shutdown().await;
 }
@@ -625,4 +626,306 @@ async fn shutdown_is_prompt_when_a_node_is_blocked_on_a_dead_dependency() {
         "shutdown waited out a stop timeout instead of being heard: {:?}",
         began.elapsed()
     );
+}
+
+// ------------------------------------------------------------ reload = self --
+// Cover for cairn 0073. `web` stands in for `dx serve`: it announces itself,
+// then rebuilds whenever `go` appears — successfully, or with a rustc error
+// when `broken` exists — and never exits. Nothing here restarts it; the point
+// is that it is still supervised.
+
+const SELF_RELOADER: &str = r#"
+        [services.web]
+        cmd = '''
+        echo 'server running'
+        while true; do
+          if [ -f go ]; then
+            rm -f go
+            echo 'rebuilding'
+            sleep 0.2
+            if [ -f broken ]; then
+              echo 'error[E0425]: cannot find value `greetng` in this scope'
+              echo ' --> src/main.rs:1:1'
+            else
+              echo 'server running'
+            fi
+          fi
+          sleep 0.03
+        done
+        '''
+        reload = "self"
+        health = { log = "server running", interval = "40ms" }
+        reloading = { log = "rebuilding" }
+        restart = "never"
+"#;
+
+fn self_reloader(extra: &str) -> String {
+    format!("{SELF_RELOADER}\n{extra}")
+}
+
+impl Harness {
+    fn pid(&self, node: &str) -> Option<u32> {
+        self.engine.state.lock().unwrap().nodes[node].pid
+    }
+
+    fn reason(&self, node: &str) -> String {
+        self.engine.state.lock().unwrap().nodes[node]
+            .reason
+            .clone()
+            .unwrap_or_default()
+    }
+
+    fn trigger(&self) {
+        std::fs::write(self.path("go"), "").unwrap();
+    }
+
+    fn lines_in(&self, file: &str) -> usize {
+        std::fs::read_to_string(self.path(file))
+            .map(|s| s.lines().count())
+            .unwrap_or(0)
+    }
+}
+
+#[tokio::test]
+async fn a_self_reload_leaves_ready_and_returns_without_a_restart() {
+    let mut h = Harness::start(
+        "self-reload",
+        &self_reloader(
+            r#"
+        [tasks.e2e]
+        depends_on = ["web"]
+        cmd = "echo ran >> e2e-runs"
+        cache = "disabled"
+        "#,
+        ),
+        &["e2e"],
+    );
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    h.wait_for("e2e done", |st| {
+        matches!(st.nodes["e2e"].status, Status::Done { .. })
+    })
+    .await;
+    let pid = h.pid("web");
+    assert_eq!(h.lines_in("e2e-runs"), 1);
+
+    h.trigger();
+    h.wait_for("web reloading", |st| {
+        matches!(st.nodes["web"].status, Status::Reloading)
+    })
+    .await;
+    h.wait_for("web healthy again", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    // The cascade: a dependent is told about a rebuild it did not see happen.
+    h.wait_for("e2e to run again", |_| h.lines_in("e2e-runs") == 2)
+        .await;
+
+    assert_eq!(
+        h.restarts("web"),
+        0,
+        "a self-reloading node is never restarted"
+    );
+    assert_eq!(h.pid("web"), pid, "and keeps the same process");
+    assert_eq!(h.reason("web"), "reloaded itself");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_watched_change_does_not_restart_a_self_reloading_node() {
+    let mut h = Harness::start(
+        "self-reload-watch",
+        &SELF_RELOADER.replace(
+            "reload = \"self\"",
+            "reload = \"self\"\nwatch = [\"src/**\"]\ndebounce = \"60ms\"",
+        ),
+        &["web"],
+    )
+    .seed("src")
+    .with_watcher();
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    let pid = h.pid("web");
+
+    std::fs::write(h.path("src/main.rs"), "// edit").unwrap();
+    tokio::time::sleep(Duration::from_millis(1000)).await;
+
+    assert_eq!(h.restarts("web"), 0);
+    assert_eq!(h.pid("web"), pid);
+    assert!(matches!(h.status("web"), Status::Healthy));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rebuild_that_fails_is_unhealthy_at_once_and_its_errors_are_issues() {
+    let mut h = Harness::start(
+        "self-reload-broken",
+        &self_reloader(r#"ready_timeout = "30s""#),
+        &["web"],
+    );
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+
+    std::fs::write(h.path("broken"), "").unwrap();
+    let began = std::time::Instant::now();
+    h.trigger();
+    h.wait_for("web unhealthy", |st| {
+        matches!(st.nodes["web"].status, Status::Unhealthy)
+    })
+    .await;
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "rustc's error should decide it, not the 30s timeout: {:?}",
+        began.elapsed()
+    );
+    assert_eq!(h.reason("web"), "rebuild failed with 1 error");
+
+    // What the overlay's Issues panel renders.
+    let snap = h.engine.state.lock().unwrap().snapshot();
+    assert_eq!(snap.status, "error");
+    assert!(
+        snap.issues
+            .iter()
+            .any(|i| i.node == "web" && i.diagnostic.code.as_deref() == Some("E0425")),
+        "the rebuild's error should be an issue"
+    );
+
+    // Fixed, and the process rebuilds by itself: healthy, still no restart.
+    std::fs::remove_file(h.path("broken")).unwrap();
+    h.trigger();
+    h.wait_for("web healthy after the fix", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    assert_eq!(h.restarts("web"), 0);
+    let snap = h.engine.state.lock().unwrap().snapshot();
+    assert!(snap.issues.is_empty(), "a fixed error must not linger");
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rebuild_that_never_finishes_is_reported_as_a_failed_reload() {
+    // Announces a rebuild, then says nothing — no error to read, so only the
+    // timeout can decide.
+    let mut h = Harness::start(
+        "self-reload-hang",
+        r#"
+        [services.web]
+        cmd = "echo 'server running'; while [ ! -f go ]; do sleep 0.03; done; echo rebuilding; sleep 30"
+        reload = "self"
+        health = { log = "server running", interval = "40ms" }
+        reloading = { log = "rebuilding" }
+        ready_timeout = "600ms"
+        restart = "never"
+        "#,
+        &["web"],
+    );
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    h.trigger();
+    h.wait_for("web unhealthy", |st| {
+        matches!(st.nodes["web"].status, Status::Unhealthy)
+    })
+    .await;
+    assert!(
+        h.reason("web").starts_with("rebuild did not finish within"),
+        "{}",
+        h.reason("web")
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rebuild_too_quick_to_observe_still_reaches_dependents() {
+    // Both lines land between two polls of a deliberately slow probe. A flag
+    // would see "ready" and nothing else; the counters see that a reload
+    // happened, so the dependent still re-runs.
+    let mut h = Harness::start(
+        "self-reload-fast",
+        r#"
+        [services.web]
+        cmd = "echo 'server running'; while true; do if [ -f go ]; then rm -f go; echo rebuilding; echo 'server running'; fi; sleep 0.02; done"
+        reload = "self"
+        health = { log = "server running", interval = "700ms" }
+        reloading = { log = "rebuilding" }
+        restart = "never"
+
+        [tasks.e2e]
+        depends_on = ["web"]
+        cmd = "echo ran >> e2e-runs"
+        cache = "disabled"
+        "#,
+        &["e2e"],
+    );
+    h.wait_for("the first e2e run", |_| h.lines_in("e2e-runs") == 1)
+        .await;
+    h.trigger();
+    h.wait_for("e2e to run again", |_| h.lines_in("e2e-runs") == 2)
+        .await;
+    assert_eq!(h.restarts("web"), 0);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_first_build_slower_than_the_timeout_comes_good_by_itself() {
+    let mut h = Harness::start(
+        "self-reload-slow-start",
+        r#"
+        [services.web]
+        cmd = "sleep 1.2; echo 'server running'; sleep 30"
+        reload = "self"
+        health = { log = "server running", interval = "40ms" }
+        reloading = { log = "rebuilding" }
+        ready_timeout = "300ms"
+        restart = "never"
+        "#,
+        &["web"],
+    );
+    h.wait_for("web unhealthy after the timeout", |st| {
+        matches!(st.nodes["web"].status, Status::Unhealthy)
+    })
+    .await;
+    h.wait_for("web healthy once the build lands", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    assert_eq!(h.restarts("web"), 0);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_rebuild_announced_while_startup_is_being_confirmed_is_not_missed() {
+    // The ready line and a rebuild arrive together; the probe only looks every
+    // 300ms, so by the time startup is confirmed the rebuild is already under
+    // way. It must read as reloading, not healthy for the whole rebuild.
+    let mut h = Harness::start(
+        "self-reload-window",
+        r#"
+        [services.web]
+        cmd = "echo 'server running'; echo rebuilding; sleep 1.5; echo 'server running'; sleep 30"
+        reload = "self"
+        health = { log = "server running", interval = "300ms" }
+        reloading = { log = "rebuilding" }
+        restart = "never"
+        "#,
+        &["web"],
+    );
+    h.wait_for("web reloading", |st| {
+        matches!(st.nodes["web"].status, Status::Reloading)
+    })
+    .await;
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    h.shutdown().await;
 }

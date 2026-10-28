@@ -238,6 +238,35 @@
         "to"
       ]
     },
+    "Reload": {
+      "description": "Who is responsible for rebuilding a service.",
+      "oneOf": [
+        {
+          "description": "turborust restarts the service, as `on_change` says.",
+          "type": "string",
+          "const": "restart"
+        },
+        {
+          "description": "The process watches and rebuilds itself; turborust never restarts it for\na change, but still supervises it: readiness, the cascade, diagnostics.",
+          "type": "string",
+          "const": "self"
+        }
+      ]
+    },
+    "Reloading": {
+      "description": "The reload-time counterpart of a readiness probe.\n\nOnly a log match, deliberately. A process that hot-patches itself keeps\nserving the old code while it rebuilds, so a port or HTTP probe passes\nthroughout and cannot say a rebuild has started.",
+      "type": "object",
+      "properties": {
+        "log": {
+          "description": "Substring the process prints when it starts a rebuild. Matched against\nANSI-stripped output.",
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "log"
+      ]
+    },
     "RestartPolicy": {
       "oneOf": [
         {
@@ -414,6 +443,21 @@
         "ready_timeout": {
           "type": "string",
           "default": "60s"
+        },
+        "reload": {
+          "description": "Who rebuilds this service when its sources change: turborust, by\nrestarting it, or the process itself (`dx serve`, `cargo leptos watch`,\n`trunk serve`).",
+          "$ref": "#/$defs/Reload"
+        },
+        "reloading": {
+          "description": "Output that means a self-reloading process has started rebuilding.\n\nTakes the node out of ready without restarting it, so dependents are told\nand the build shows as in flight; it is ready again when `health.log`\nnext matches.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Reloading"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "restart": {
           "$ref": "#/$defs/RestartPolicy"

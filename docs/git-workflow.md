@@ -26,7 +26,7 @@ scripts/agent new bug "title"     # file a tracker item and branch for it
 scripts/agent start 0041          # or take one that already exists
 cd ../.worktrees/turborust/fix-0041-...
                                   # do the work
-scripts/agent check               # formatter, linter, tests, roadmap
+scripts/agent check               # formatter, linter, tests, roadmap, tracker
 scripts/agent commit "fix(proc): start the pty reader before the child"
 scripts/agent pr                  # push, open a PR from the tracker item
 scripts/agent clean               # once merged, remove the worktree
@@ -80,6 +80,31 @@ Refs: 0037
 
 `scripts/agent commit` adds the `Refs:` trailer from the worktree, so it is never
 the thing that gets forgotten.
+
+## Closing the item
+
+Close the item in the branch that finishes it — `cairn close <id>`, then commit —
+so merging the PR closes the item too, the way a closing keyword does on GitHub.
+A step that comes after the merge belongs to nobody. `scripts/agent pr` warns
+when the referenced item is still open, and so does CI on the pull request.
+
+`scripts/audit` catches what slips through. It reads the item files directly, so
+it needs no cairn, and it runs in `agent check` and in CI, where each finding is
+an annotation on the item file.
+
+| Finding | Level | Precedent |
+|---|---|---|
+| a closed milestone still has open items | error | Jira will not release a version with unresolved issues |
+| every item in a milestone is finished, but it is open | warning | GitLab offers to close the milestone; it does not insist |
+| a done item has unticked acceptance criteria | warning | `cairn check` warns, so criteria stay true rather than tickable |
+| an open item is referenced by a `Refs:` on the default branch | warning | work can span several PRs |
+| a claim is held `claim_stale_after` days (default 30) | warning | cairn: stale means visible, never revoked |
+| an open item has an empty section | warning | issue forms with required fields |
+| this branch refs an item and leaves it open (`--branch`) | notice | changeset-bot: a nudge on the PR, never a gate |
+
+Only errors fail. A warning in CI is in front of the author on the PR without
+blocking someone else's unrelated change on it; `scripts/audit --strict` makes
+warnings fail too, for anyone who wants that locally.
 
 ## What the hooks enforce
 
