@@ -151,10 +151,13 @@ The dev loop moved while this tool was being built.
 
 ### backlog
 
-- [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
 - [ ] `0074` Test failures are invisible where every other failure is visible <sup>feature · p1</sup>
 - [ ] `0075` doctor advises but never measures <sup>feature · p1</sup>
 - [ ] `0078` Machine-readable output is not a stable contract <sup>chore · p2</sup>
+
+### in progress
+
+- [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
 
 ## later — Not now, not never
 
