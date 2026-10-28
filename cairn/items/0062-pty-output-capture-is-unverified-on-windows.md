@@ -5,7 +5,7 @@ type: bug
 status: backlog
 milestone: later
 created: 2026-09-08
-updated: 2026-09-08
+updated: 2026-10-28
 priority: p2
 effort: m
 area: proc
@@ -73,3 +73,7 @@ Candidates worth checking first:
 - [ ] Both tests run and pass on windows-latest
 - [ ] The `#[cfg(unix)]` gates are removed
 - [ ] A configurable shell makes the integration fixtures portable
+
+## 2026-10-28
+
+mise has `run_windows`, a per-task replacement command on Windows. A configurable shell (above) is the broader answer and makes most of that unnecessary, but a per-node override would still help where a command has no portable spelling at all. Noted from the `0090` survey rather than filed separately.

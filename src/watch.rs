@@ -32,6 +32,7 @@ pub struct Watcher {
     /// Dropping this stops the OS watch.
     _inner: Box<dyn std::any::Any + Send>,
     rx: mpsc::UnboundedReceiver<BTreeSet<String>>,
+    warnings: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl Watcher {
@@ -39,6 +40,37 @@ impl Watcher {
     pub async fn recv(&mut self) -> Option<BTreeSet<String>> {
         self.rx.recv().await
     }
+
+    /// Problems that mean some changes will not be seen, as they happen.
+    ///
+    /// Taken out once, so a dispatch loop can wait on both streams; only this
+    /// receiver leaves, and the guard stays with `recv` as above.
+    pub fn take_warnings(&mut self) -> mpsc::UnboundedReceiver<String> {
+        self.warnings
+            .take()
+            .unwrap_or_else(|| mpsc::unbounded_channel().1)
+    }
+}
+
+/// What to tell someone whose watch just stopped covering part of the tree.
+///
+/// Silence was the old answer, at both places this can happen — a directory
+/// that failed to register at startup was skipped, and the error notify sends
+/// when a directory created later cannot be watched was dropped — so edits there
+/// simply never rebuilt anything (cairn 0089). Only the watch limit is worth a
+/// warning: anything else here is a directory that vanished, which is harmless.
+fn watch_warning(err: &notify::Error) -> Option<String> {
+    if !matches!(err.kind, notify::ErrorKind::MaxFilesWatch) {
+        return None;
+    }
+    let limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+        .map(|s| format!(" (fs.inotify.max_user_watches = {})", s.trim()))
+        .unwrap_or_default();
+    Some(format!(
+        "the OS file-watch limit is reached{limit}, so edits in some directories will \
+         not be seen. Raise it, e.g. `sudo sysctl fs.inotify.max_user_watches=524288`, \
+         and restart turborust"
+    ))
 }
 
 /// Directories never handed to the OS watcher.
@@ -54,14 +86,34 @@ const NEVER_WATCH: [&str; 7] = [
 
 pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (warn_tx, warn_rx) = mpsc::unbounded_channel();
     let root_owned = root.to_path_buf();
+    let runtime_warn = warn_tx.clone();
 
     let mut debouncer = new_debouncer(debounce, None, move |res: DebounceEventResult| {
-        // Watch errors (a vanished directory, an exhausted fd limit) are not
-        // worth tearing the dev loop down for; the next batch usually works.
-        let Ok(events) = res else { return };
+        // Errors are not worth tearing the dev loop down for, but the one that
+        // means part of the tree is no longer watched has to be said out loud.
+        let events = match res {
+            Ok(events) => events,
+            Err(errors) => {
+                if let Some(warning) = errors.iter().find_map(watch_warning) {
+                    let _ = runtime_warn.send(warning);
+                }
+                return;
+            }
+        };
         let mut paths: BTreeSet<String> = BTreeSet::new();
         for ev in events {
+            // Reading is not changing. inotify reports a file or directory being
+            // opened, and `expand_dir` below reads every directory it is handed —
+            // so on Linux each access event produced the next, and a nested
+            // workspace restarted its services about eight times a second,
+            // forever (cairn 0088). A write always produces a modify event too,
+            // so nothing real is lost; watchexec ignores access events by
+            // default for the same reason.
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                continue;
+            }
             for p in &ev.paths {
                 if let Some(rel) = relativize(&root_owned, p) {
                     paths.insert(rel);
@@ -96,9 +148,18 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
         } else {
             RecursiveMode::NonRecursive
         };
-        // A directory vanishing between readdir and watch is not fatal.
-        if debouncer.watch(&path, mode).is_ok() {
-            watched += 1;
+        match debouncer.watch(&path, mode) {
+            Ok(()) => watched += 1,
+            Err(e) => {
+                // Notify registers what it can before giving up, so the rest of
+                // this directory is partly watched; say so once and carry on.
+                if let Some(warning) = watch_warning(&e) {
+                    let _ = warn_tx.send(warning);
+                    watched += 1;
+                }
+                // Anything else is a directory that vanished between readdir and
+                // watch, which is not worth a word.
+            }
         }
     }
     if watched == 0 {
@@ -108,6 +169,7 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
     Ok(Watcher {
         _inner: Box::new(debouncer),
         rx,
+        warnings: Some(warn_rx),
     })
 }
 
@@ -173,6 +235,22 @@ mod tests {
     }
 
     #[test]
+    fn only_the_watch_limit_is_worth_a_warning() {
+        // Cover for cairn 0089. The limit cannot be lowered from a test, so the
+        // decision is pinned here and the end-to-end path was checked by hand
+        // with `fs.inotify.max_user_watches` lowered.
+        let limit = watch_warning(&notify::Error::new(notify::ErrorKind::MaxFilesWatch))
+            .expect("the watch limit must be reported");
+        assert!(
+            limit.contains("will not be seen") && limit.contains("max_user_watches"),
+            "{limit}"
+        );
+        // A directory that vanished between listing and watching is not news.
+        let vanished = notify::Error::io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(watch_warning(&vanished), None);
+    }
+
+    #[test]
     fn dispatch_selects_only_interested_matchers() {
         let paths: BTreeSet<String> = [
             "crates/api/src/main.rs".to_string(),
@@ -235,6 +313,68 @@ mod tests {
             seen.iter().any(|p| p.ends_with("a.rs")),
             "no event within the deadline; saw {seen:?}"
         );
+    }
+
+    /// Batches until the watcher has been quiet for `quiet`, or `None` if it
+    /// never goes quiet within `within`.
+    async fn settle(w: &mut Watcher, quiet: Duration, within: Duration) -> Option<usize> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut batches = 0;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(quiet, w.recv()).await {
+                Ok(Some(_)) => batches += 1,
+                Ok(None) => panic!("the watch channel closed"),
+                Err(_) => return Some(batches),
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn reading_a_nested_tree_is_not_a_change() {
+        // Cover for cairn 0088. On Linux, inotify reports a file or directory
+        // being *opened* — and reading a directory is what `expand_dir` does
+        // for every directory event. Treated as changes, those access events
+        // fed themselves: one edit, or merely arming the watch on a nested
+        // tree, restarted a service about eight times a second, forever.
+        // A flat `src/` never triggers it, which is why nothing caught it.
+        let dir = std::env::temp_dir().join(format!("turborust-watch-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["crates/api/src", "crates/shared/src"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("crates/shared/src/lib.rs"), "").unwrap();
+        let root = dir.canonicalize().unwrap();
+        let mut w = watch(&root, Duration::from_millis(50)).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Live first, so the silence below means something.
+        let seen = write_until_seen(&mut w, &root, "crates/api/src/main.rs").await;
+        assert!(seen.iter().any(|p| p.ends_with("main.rs")), "saw {seen:?}");
+
+        let settled = settle(&mut w, Duration::from_millis(500), Duration::from_secs(5)).await;
+        assert!(
+            settled.is_some(),
+            "one write left the watcher reporting forever"
+        );
+
+        // Exactly what a build, an editor's file tree or `expand_dir` does.
+        for f in ["crates/api/src/main.rs", "crates/shared/src/lib.rs"] {
+            let _ = std::fs::read_to_string(root.join(f)).unwrap();
+        }
+        for d in [
+            "crates",
+            "crates/api",
+            "crates/api/src",
+            "crates/shared/src",
+        ] {
+            let _ = std::fs::read_dir(root.join(d)).unwrap().count();
+        }
+        let after = tokio::time::timeout(Duration::from_secs(1), w.recv()).await;
+        let _ = std::fs::remove_dir_all(&root);
+        if let Ok(Some(batch)) = after {
+            panic!("reading files was reported as a change: {batch:?}");
+        }
     }
 }
 

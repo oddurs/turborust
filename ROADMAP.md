@@ -145,7 +145,7 @@ The cache is the load-bearing claim in this project. `why` explains it, the
 
 ## v1.4 — The loop keeps up
 
-`#####·····` 43% · 3 of 7 done · due 2027-11-01
+`######····` 56% · 5 of 9 done · due 2027-11-01
 
 The dev loop moved while this tool was being built.
 
@@ -164,6 +164,8 @@ The dev loop moved while this tool was being built.
 - [x] `0085` A stop request from outside kills turborust and orphans its children <sup>bug · p0</sup>
 - [x] `0086` A config mistake runs quietly instead of being refused <sup>bug · p0</sup>
 - [x] `0087` turborust cannot be released or installed safely <sup>chore · p1</sup>
+- [x] `0088` On Linux, a nested workspace restarts its services forever <sup>bug · p0</sup>
+- [x] `0089` A file-watch limit silently stops rebuilds <sup>bug · p1</sup>
 
 ## later — Not now, not never
 
@@ -191,7 +193,19 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`##########` 100% · 5 of 5 done
+`####······` 40% · 6 of 15 done
+
+### backlog
+
+- [ ] `0091` Readiness cannot run a command <sup>feature · p1</sup>
+- [ ] `0092` A service that stops answering stays healthy <sup>feature · p1</sup>
+- [ ] `0093` There is no way to load a .env file <sup>feature · p1</sup>
+- [ ] `0094` No polling fallback where file events do not arrive <sup>feature · p2</sup>
+- [ ] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
+- [ ] `0096` A crash loop never gives up <sup>feature · p3</sup>
+- [ ] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
+- [ ] `0098` A command cannot see which files changed <sup>feature · p3</sup>
+- [ ] `0101` An edit right after the watch starts can be missed <sup>bug · p2</sup>
 
 ### done
 
@@ -200,4 +214,5 @@ Good ideas without a date yet.
 - [x] `0066` plan the next two milestones <sup>chore · p2</sup>
 - [x] `0083` a test that shells out to git can reach the wrong repository <sup>chore · p1</sup>
 - [x] `0084` The tracker drifts from the work, and nothing notices <sup>chore · p1</sup>
+- [x] `0090` Survey local process managers, watchers and task runners <sup>chore · p2</sup>
 
