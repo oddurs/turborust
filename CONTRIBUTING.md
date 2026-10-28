@@ -19,7 +19,7 @@ advances through a merge.
 ```sh
 scripts/agent new bug "the thing that is wrong"   # files a tracker item and branches
 scripts/agent start 0042                          # or take an existing one
-scripts/agent check                               # formatter, lints, tests, roadmap
+scripts/agent check                               # formatter, lints, tests, roadmap, tracker
 scripts/agent commit "fix(proc): ..."
 scripts/agent pr
 ```

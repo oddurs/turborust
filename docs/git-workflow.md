@@ -26,7 +26,7 @@ scripts/agent new bug "title"     # file a tracker item and branch for it
 scripts/agent start 0041          # or take one that already exists
 cd ../.worktrees/turborust/fix-0041-...
                                   # do the work
-scripts/agent check               # formatter, linter, tests, roadmap
+scripts/agent check               # formatter, linter, tests, roadmap, tracker
 scripts/agent commit "fix(proc): start the pty reader before the child"
 scripts/agent pr                  # push, open a PR from the tracker item
 scripts/agent clean               # once merged, remove the worktree
@@ -80,6 +80,25 @@ Refs: 0037
 
 `scripts/agent commit` adds the `Refs:` trailer from the worktree, so it is never
 the thing that gets forgotten.
+
+## Closing the item
+
+Close the item in the branch that finishes it — `cairn close <id>`, then commit —
+so merging the PR closes the item too. A step that comes after the merge belongs
+to nobody. `scripts/agent pr` warns when the referenced item is still open.
+
+`scripts/audit` catches what slips through. It reads the item files directly, so
+it needs no cairn, and it runs in `agent check` and in CI:
+
+| Finding | Level |
+|---|---|
+| a milestone is open, but every item scheduled in it is finished | error |
+| an item is done, but has unticked acceptance criteria | error |
+| an item is open, but a commit on the default branch carries its `Refs:` | warning |
+| an item has been active for over 30 days with no update | warning |
+
+Warnings are not errors because both can be right: work can span several PRs,
+and some work is slow. `scripts/audit --strict` fails on them too.
 
 ## What the hooks enforce
 

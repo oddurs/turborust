@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+#
+# Finds tracker items whose status no longer matches the work.
+#
+# `cairn check` validates that items are well formed; it cannot know that the
+# work an item describes has landed. That gap is where the roadmap rots: an item
+# left in `doing` after its commit merged, a milestone still open after its last
+# item closed, a done item whose acceptance criteria were never ticked. Each of
+# these was found by hand once, which is the reason to stop finding them by hand.
+#
+# Reads the item files directly, so it runs where cairn cannot be installed —
+# which is exactly where the cairn-based CI check skips itself.
+#
+#   scripts/audit           report; exits non-zero on any error
+#   scripts/audit --strict  treat warnings as errors too
+#
+set -euo pipefail
+
+strict=false
+[ "${1:-}" = "--strict" ] && strict=true
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+[ -f cairn.toml ] && [ -d cairn/items ] || { echo "  no tracker here" >&2; exit 0; }
+
+# A claim older than this, on an item nobody has touched since, is presumed
+# abandoned rather than slow.
+stale_days=${AUDIT_STALE_DAYS:-30}
+today=$(date -u +%Y-%m-%d)
+
+# Item ids named by a `Refs:` trailer on the default branch: work that has landed.
+# Read from git rather than the forge, so it works offline and in CI alike.
+default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+default_branch=${default_branch:-main}
+# CI checks out a detached merge ref, where only the remote-tracking branch exists.
+base=$default_branch
+git rev-parse --verify --quiet "refs/remotes/origin/$default_branch" >/dev/null \
+    && base="origin/$default_branch"
+landed=$(git log "$base" --format='%(trailers:key=Refs,valueonly)' 2>/dev/null \
+    | tr ', ' '\n\n' | sed -E 's/^0*//' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true)
+
+# One awk pass over cairn.toml and every item. Status categories come from the
+# config rather than being hardcoded, since the statuses themselves are renameable.
+out=$(awk -v today="$today" -v stale="$stale_days" -v landed=" $landed " '
+    function days(d,   a) {
+        # Days since an epoch; only differences matter, so a 365-day year with
+        # whole-month approximation is accurate enough for a staleness threshold.
+        split(d, a, "-")
+        return a[1] * 365 + a[1] / 4 + (a[2] - 1) * 30.44 + a[3]
+    }
+    function flush() {
+        if (file == "") return
+        cat = category[status]
+        finished = (cat == "done" || cat == "dropped")
+        label = sprintf("%04d %s", id, title)
+        if (type == "milestone") {
+            mile_label[key] = label; mile_done[key] = finished
+        } else if (milestone != "") {
+            sched[milestone]++
+            if (finished) sched_done[milestone]++
+        }
+        if (cat == "done" && unticked > 0)
+            printf "error\t%s\tdone, but %d acceptance criteria are unticked\n", label, unticked
+        if (!finished && index(landed, " " id " "))
+            printf "warn\t%s\tstill %s, but a commit on the default branch refs it\n", label, status
+        if (cat == "active" && claimed != "" && updated != "" &&
+            days(today) - days(updated) > stale)
+            printf "warn\t%s\t%s since %s with no update; finished, or abandoned?\n", label, status, updated
+    }
+    FILENAME ~ /cairn\.toml$/ {
+        # Only keys inside a [[status]] table count; any other header ends one.
+        if ($0 ~ /^\[/) { in_status = ($0 ~ /^\[\[status\]\]/); sname = "" }
+        if (!in_status) next
+        if ($0 ~ /^name *=/) { sname = $0; sub(/^name *= *"/, "", sname); sub(/".*/, "", sname) }
+        if ($0 ~ /^category *=/ && sname != "") {
+            c = $0; sub(/^category *= *"/, "", c); sub(/".*/, "", c); category[sname] = c
+        }
+        next
+    }
+    FNR == 1 {
+        flush()
+        file = FILENAME; fm = 0; id = 0
+        title = status = type = key = milestone = claimed = updated = ""; unticked = 0
+    }
+    /^---[ \t]*$/ && fm < 2 { fm++; next }
+    fm == 1 {
+        v = $0; sub(/^[a-z_]+: */, "", v); gsub(/^["\x27]|["\x27]$/, "", v)
+        if ($0 ~ /^id:/) id = v + 0
+        else if ($0 ~ /^title:/) title = v
+        else if ($0 ~ /^status:/) status = v
+        else if ($0 ~ /^type:/) type = v
+        else if ($0 ~ /^key:/) key = v
+        else if ($0 ~ /^milestone:/) milestone = v
+        else if ($0 ~ /^claimed:/) claimed = v
+        else if ($0 ~ /^updated:/) updated = v
+        next
+    }
+    fm >= 2 && /^[ \t]*- \[ \]/ { unticked++ }
+    END {
+        flush()
+        for (k in mile_label) {
+            if (mile_done[k] || !sched[k]) continue
+            if (sched_done[k] == sched[k])
+                printf "error\t%s\tall %d scheduled items are finished, but the milestone is open\n", mile_label[k], sched[k]
+        }
+    }
+' cairn.toml cairn/items/*.md | sort -t$'\t' -k1,1 -k2,2)
+
+errors=$(printf '%s\n' "$out" | grep -c '^error' || true)
+warnings=$(printf '%s\n' "$out" | grep -c '^warn' || true)
+
+printf '%s\n' "$out" | while IFS=$'\t' read -r level item msg; do
+    [ -n "$level" ] || continue
+    case "$level" in
+        error) printf '  \033[31m✗\033[0m %s — %s\n' "$item" "$msg" ;;
+        warn)  printf '  \033[33m·\033[0m %s — %s\n' "$item" "$msg" ;;
+    esac
+done
+
+if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ]; then
+    printf '  \033[32m✓\033[0m tracker matches the work\n'
+fi
+
+[ "$errors" -gt 0 ] && exit 1
+$strict && [ "$warnings" -gt 0 ] && exit 1
+exit 0

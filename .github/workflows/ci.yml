@@ -75,6 +75,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The audit reads `Refs:` trailers from the default branch's history.
+          fetch-depth: 0
+      # Before the install, and with no dependency on it: an item left open
+      # after its work merged is drift `cairn check` cannot see, and this step
+      # must not be skippable for the reason that one can be.
+      - name: tracker matches the work
+        run: scripts/audit
       - uses: dtolnay/rust-toolchain@stable
       # Not every checkout can install the tracker; when it cannot, say so and
       # move on rather than failing a build for a reason unrelated to the code.
