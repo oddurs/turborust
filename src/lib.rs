@@ -18,6 +18,7 @@ pub mod plan;
 pub mod proc;
 pub mod proxy;
 pub mod serve;
+pub mod signals;
 pub mod state;
 pub mod summary;
 pub mod tui;
