@@ -5,7 +5,7 @@ type: feature
 status: dropped
 milestone: later
 created: 2026-09-10
-updated: 2026-09-10
+updated: 2026-10-28
 priority: p2
 area: scope
 ---
@@ -36,3 +36,7 @@ Tilt's two-status model — how the *build* went, separately from what the
 *process* is doing right now — is exactly the distinction `0073` needs in order
 to represent a node that is rebuilding itself while still serving. Taken; the
 rest declined.
+
+## 2026-10-28
+
+Docker Compose `watch` adds file *sync* into a running container (`sync`, `sync+restart`, `rebuild`). Same boundary as above: that is orchestrating containers, not processes. Noted from the `0090` survey.
