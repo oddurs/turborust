@@ -66,16 +66,27 @@ cmd_start() {
     [ $# -ge 1 ] || die "usage: agent start <tracker-id> | agent start <type> \"<title>\""
 
     local prefix slug refs=""
-    if [[ "$1" =~ ^[0-9]+$ ]] && has_cairn; then
-        local id json title type
+    if [[ "$1" =~ ^[0-9]+$ ]] && [ -f "$repo_root/cairn.toml" ]; then
+        local id json title type item
         # `10#` is load-bearing: printf reads a leading zero as octal, so a
         # zero-padded id like 0063 becomes 51 and silently opens a different
         # item. Tracker ids are exactly the shape that triggers it.
         id=$(printf '%04d' "$((10#$1))")
-        json=$(cd "$repo_root" && cairn show "$1" --json 2>/dev/null) \
-            || die "no tracker item $id"
-        title=$(printf '%s' "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["title"])')
-        type=$(printf '%s' "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("type","chore"))')
+        if has_cairn; then
+            json=$(cd "$repo_root" && cairn show "$1" --json 2>/dev/null) \
+                || die "no tracker item $id"
+            title=$(printf '%s' "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin)["title"])')
+            type=$(printf '%s' "$json" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("type","chore"))')
+        else
+            # Two frontmatter fields do not need the tracker installed. Without
+            # this, taking an item where cairn is missing failed with a usage
+            # error for a different form of the command.
+            item=$(ls "$repo_root/cairn/items/$id"-*.md 2>/dev/null | head -1 || true)
+            [ -n "$item" ] || die "no tracker item $id"
+            title=$(sed -n "s/^title: *//p" "$item" | head -1 | sed -E "s/^['\"]//; s/['\"]$//")
+            type=$(sed -n 's/^type: *//p' "$item" | head -1)
+            warn "  cairn not found: branching from $id, but not claiming it"
+        fi
         prefix=$(tracker_type_to_prefix "$type")
         slug="$id-$(slugify "$title")"
         refs="$id"
@@ -160,6 +171,13 @@ cmd_check() {
     fi
     printf '%s\n' "$out" | grep -E '^test result:' | sed 's/^/    /'
     if has_cairn; then dim "  roadmap"; cairn check | sed 's/^/    /'; fi
+    # Needs no cairn, so it runs even where the roadmap check above cannot.
+    dim "  tracker"
+    if ! out=$("$repo_root/scripts/audit" 2>&1); then
+        printf '%s\n' "$out" | sed 's/^/  /'
+        die "the tracker has drifted from the work"
+    fi
+    printf '%s\n' "$out" | sed 's/^/  /'
     say "green"
 }
 
@@ -193,10 +211,24 @@ cmd_pr() {
         || die "no remote configured — add one, then rerun"
 
     cmd_check
-    git push -u origin "$branch"
 
     local title body refs=""
     [ -f .agent-refs ] && refs=$(cat .agent-refs)
+
+    # Close the item in the branch, not after the merge. A step that comes after
+    # the merge belongs to nobody, and it is the step that gets skipped: that is
+    # how finished work sat in `doing` for weeks.
+    if [ -n "$refs" ]; then
+        local item status=""
+        item=$(ls "cairn/items/$refs"-*.md 2>/dev/null | head -1 || true)
+        [ -n "$item" ] && status=$(sed -n 's/^status: *//p' "$item" | head -1)
+        if [ -n "$status" ] && [ "$status" != "done" ]; then
+            warn "  $refs is still '$status'. If this PR finishes it, close it here"
+            warn "  (cairn close $refs; agent commit) so the merge closes it too."
+        fi
+    fi
+
+    git push -u origin "$branch"
     title=$(git log -1 --pretty=%s)
 
     # The tracker item already states the problem and the acceptance criteria;
