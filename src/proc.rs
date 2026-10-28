@@ -220,6 +220,13 @@ pub fn spawn_with(
     isolated: bool,
     events: mpsc::UnboundedSender<ProcEvent>,
 ) -> Result<Handle> {
+    // The pty library falls back to the home directory when `cwd` does not
+    // exist, so a typo in `cwd` ran the command somewhere else entirely — a
+    // `rm -rf build` in $HOME. Checked here, at the last moment, because a
+    // dependency may be what creates the directory (cairn 0086).
+    if !cwd.is_dir() {
+        anyhow::bail!("working directory `{}` does not exist", cwd.display());
+    }
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {

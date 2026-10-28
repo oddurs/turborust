@@ -218,6 +218,38 @@ async fn a_service_that_dies_fails_the_run_instead_of_hanging() {
     );
 }
 
+#[tokio::test]
+async fn a_missing_working_directory_fails_instead_of_running_elsewhere() {
+    // Cover for cairn 0086. The pty library falls back to the home directory
+    // when `cwd` does not exist, so this task used to run in $HOME. The marker
+    // is an absolute path inside the sandbox, so a regression is detected
+    // without writing anything into the real home directory.
+    let sb = Sandbox::new("missing-cwd");
+    let marker = sb.path("ran-anyway");
+    let (code, engine) = run(
+        &sb,
+        &format!(
+            r#"
+            [tasks.clean]
+            cwd = "does/not/exist"
+            cmd = "touch '{m}'"
+            "#,
+            m = marker.display()
+        ),
+        &["clean"],
+    )
+    .await;
+    assert_ne!(code, 0, "a task with no directory to run in must fail");
+    assert!(
+        !marker.exists(),
+        "the task ran somewhere other than its cwd"
+    );
+    assert!(matches!(
+        engine.state.lock().unwrap().nodes["clean"].status,
+        Status::Failed(_)
+    ));
+}
+
 // ---------------------------------------------------------------- cache ----
 // Cover for cairn 0015: outputs must key the task, and a hit must reproduce the
 // result rather than assume the tree was not touched.

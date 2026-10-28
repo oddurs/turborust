@@ -180,7 +180,9 @@ pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
 
     let mut nodes = BTreeMap::new();
     for name in &order {
-        nodes.insert(name.clone(), resolve_node(ws, metadata.as_ref(), name)?);
+        let node = resolve_node(ws, metadata.as_ref(), name)?;
+        check_paths(&node)?;
+        nodes.insert(name.clone(), node);
     }
 
     let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -388,6 +390,38 @@ fn parse_signal(name: &str) -> Result<i32> {
     })
 }
 
+/// Refuses globs and output paths that cannot mean what they say.
+///
+/// Done here, once, rather than where each is used: a bad glob used to surface
+/// mid-run as a task that exited 1 and printed nothing, and an output outside
+/// the workspace was archived and then *restored* there by a cache hit — a
+/// cache entry writing wherever the path pointed (cairn 0086).
+fn check_paths(node: &Node) -> Result<()> {
+    let name = &node.name;
+    for (field, globs) in [
+        ("inputs", &node.inputs),
+        ("outputs", &node.outputs),
+        ("watch", &node.watch),
+        ("ignore", &node.ignore),
+    ] {
+        // The matcher the run will build, so this accepts exactly what it does.
+        if let Err(e) = crate::cache::Matcher::new(globs, &[]) {
+            bail!("`{name}`: {e:#} in `{field}`");
+        }
+    }
+    for out in &node.outputs {
+        let escapes = out.split(['/', '\\']).any(|seg| seg == "..");
+        let absolute = out.starts_with(['/', '\\']) || out.get(1..2) == Some(":");
+        if escapes || absolute {
+            bail!(
+                "`{name}`: output `{out}` is outside the workspace. Outputs are restored \
+                 from the cache on a hit, so they must stay inside it"
+            );
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +434,64 @@ mod tests {
             source: None,
         };
         resolve(&ws, &[]).unwrap()
+    }
+
+    fn resolve_err(src: &str, target: &str) -> String {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: None,
+        };
+        match resolve(&ws, &[target.to_string()]) {
+            Ok(_) => panic!("expected the config to be rejected"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    // Cover for cairn 0086: refused at plan time, not discovered mid-run.
+
+    #[test]
+    fn a_bad_glob_is_refused_with_the_field_it_is_in() {
+        for field in ["inputs", "outputs", "ignore"] {
+            let e = resolve_err(
+                &format!("[tasks.a]\ncmd = \"x\"\n{field} = [\"src/[unclosed\"]\n"),
+                "a",
+            );
+            assert!(e.contains("invalid glob `src/[unclosed`"), "{e}");
+            assert!(e.contains(&format!("in `{field}`")), "{e}");
+        }
+        let e = resolve_err("[services.s]\ncmd = \"x\"\nwatch = [\"{a\"]\n", "s");
+        assert!(e.contains("in `watch`"), "{e}");
+    }
+
+    #[test]
+    fn an_output_outside_the_workspace_is_refused() {
+        for out in [
+            "../escape.txt",
+            "dist/../../escape",
+            "/etc/passwd",
+            "C:\\\\x",
+            "..\\\\x",
+        ] {
+            let e = resolve_err(
+                &format!("[tasks.a]\ncmd = \"x\"\noutputs = ['{out}']\n"),
+                "a",
+            );
+            assert!(e.contains("is outside the workspace"), "{out}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_output_that_only_looks_like_it_escapes_is_fine() {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(
+                "[tasks.a]\ncmd = \"x\"\noutputs = [\"dist/**\", \"a..b/x\", \"..hidden\"]\n",
+            )
+            .unwrap(),
+            source: None,
+        };
+        assert!(resolve(&ws, &["a".to_string()]).is_ok());
     }
 
     #[test]

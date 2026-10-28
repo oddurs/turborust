@@ -187,6 +187,11 @@ already be restored incompletely from cache. If a task has effects it cannot
 declare, give it `cache = "disabled"` and it will neither be replayed nor be
 treated as stable by anything downstream.
 
+Outputs must stay inside the workspace: an absolute path or one that climbs out
+with `..` is refused when the config is loaded. A hit writes those files back, so
+an output outside the workspace would let a cache entry write wherever the path
+pointed.
+
 The safe base is passed but not hashed: without `PATH` nothing runs, and hashing it
 would miss whenever a shell rearranged itself. Swapping toolchains via `PATH` is
 covered by the global hash (`0017`), which folds in `rustc -V` directly.
