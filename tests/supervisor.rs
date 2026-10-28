@@ -1276,3 +1276,37 @@ async fn a_nested_workspace_is_not_restarted_by_being_watched() {
     );
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_node_without_liveness_is_never_probed_once_ready() {
+    // Readiness is a startup check; only a declared `liveness` keeps asking.
+    // Every probe run appends a line, so the count says how often it ran.
+    let mut h = Harness::start(
+        "no-liveness",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        health = { cmd = "echo . >> probes", interval = "50ms" }
+        restart = "never"
+        "#,
+        &["api"],
+    );
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let runs = || {
+        std::fs::read_to_string(h.path("probes"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    let at_ready = runs();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        runs(),
+        at_ready,
+        "a probe ran after readiness with no liveness declared"
+    );
+    h.shutdown().await;
+}
