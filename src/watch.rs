@@ -62,6 +62,16 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
         let Ok(events) = res else { return };
         let mut paths: BTreeSet<String> = BTreeSet::new();
         for ev in events {
+            // Reading is not changing. inotify reports a file or directory being
+            // opened, and `expand_dir` below reads every directory it is handed —
+            // so on Linux each access event produced the next, and a nested
+            // workspace restarted its services about eight times a second,
+            // forever (cairn 0088). A write always produces a modify event too,
+            // so nothing real is lost; watchexec ignores access events by
+            // default for the same reason.
+            if matches!(ev.kind, notify::EventKind::Access(_)) {
+                continue;
+            }
             for p in &ev.paths {
                 if let Some(rel) = relativize(&root_owned, p) {
                     paths.insert(rel);
@@ -235,6 +245,68 @@ mod tests {
             seen.iter().any(|p| p.ends_with("a.rs")),
             "no event within the deadline; saw {seen:?}"
         );
+    }
+
+    /// Batches until the watcher has been quiet for `quiet`, or `None` if it
+    /// never goes quiet within `within`.
+    async fn settle(w: &mut Watcher, quiet: Duration, within: Duration) -> Option<usize> {
+        let deadline = tokio::time::Instant::now() + within;
+        let mut batches = 0;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(quiet, w.recv()).await {
+                Ok(Some(_)) => batches += 1,
+                Ok(None) => panic!("the watch channel closed"),
+                Err(_) => return Some(batches),
+            }
+        }
+        None
+    }
+
+    #[tokio::test]
+    async fn reading_a_nested_tree_is_not_a_change() {
+        // Cover for cairn 0088. On Linux, inotify reports a file or directory
+        // being *opened* — and reading a directory is what `expand_dir` does
+        // for every directory event. Treated as changes, those access events
+        // fed themselves: one edit, or merely arming the watch on a nested
+        // tree, restarted a service about eight times a second, forever.
+        // A flat `src/` never triggers it, which is why nothing caught it.
+        let dir = std::env::temp_dir().join(format!("turborust-watch-read-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for d in ["crates/api/src", "crates/shared/src"] {
+            std::fs::create_dir_all(dir.join(d)).unwrap();
+        }
+        std::fs::write(dir.join("crates/shared/src/lib.rs"), "").unwrap();
+        let root = dir.canonicalize().unwrap();
+        let mut w = watch(&root, Duration::from_millis(50)).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+
+        // Live first, so the silence below means something.
+        let seen = write_until_seen(&mut w, &root, "crates/api/src/main.rs").await;
+        assert!(seen.iter().any(|p| p.ends_with("main.rs")), "saw {seen:?}");
+
+        let settled = settle(&mut w, Duration::from_millis(500), Duration::from_secs(5)).await;
+        assert!(
+            settled.is_some(),
+            "one write left the watcher reporting forever"
+        );
+
+        // Exactly what a build, an editor's file tree or `expand_dir` does.
+        for f in ["crates/api/src/main.rs", "crates/shared/src/lib.rs"] {
+            let _ = std::fs::read_to_string(root.join(f)).unwrap();
+        }
+        for d in [
+            "crates",
+            "crates/api",
+            "crates/api/src",
+            "crates/shared/src",
+        ] {
+            let _ = std::fs::read_dir(root.join(d)).unwrap().count();
+        }
+        let after = tokio::time::timeout(Duration::from_secs(1), w.recv()).await;
+        let _ = std::fs::remove_dir_all(&root);
+        if let Ok(Some(batch)) = after {
+            panic!("reading files was reported as a change: {batch:?}");
+        }
     }
 }
 

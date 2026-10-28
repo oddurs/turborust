@@ -929,3 +929,47 @@ async fn a_rebuild_announced_while_startup_is_being_confirmed_is_not_missed() {
     .await;
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_nested_workspace_is_not_restarted_by_being_watched() {
+    // Cover for cairn 0088: on Linux, watching a workspace laid out like a real
+    // one — crates/<name>/src/*.rs — restarted its services about eight times a
+    // second with nothing edited, because reading a directory was reported as
+    // changing it. Every other test here watches a flat `src/`, which never
+    // took that path.
+    let h = Harness::start(
+        "nested",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        watch = ["crates/**/*.rs"]
+        debounce = "60ms"
+        "#,
+        &["api"],
+    );
+    // The tree exists before the watch is armed, as a real workspace does.
+    for d in ["crates/api/src", "crates/shared/src"] {
+        std::fs::create_dir_all(h.path(d)).unwrap();
+    }
+    std::fs::write(h.path("crates/api/src/main.rs"), "fn main() {}").unwrap();
+    std::fs::write(h.path("crates/shared/src/lib.rs"), "").unwrap();
+    let mut h = h.with_watcher();
+
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(h.restarts("api"), 0, "nothing was edited");
+
+    std::fs::write(h.path("crates/shared/src/lib.rs"), "// one").unwrap();
+    h.wait_for("the restart", |st| st.nodes["api"].restarts >= 1)
+        .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(
+        h.restarts("api"),
+        1,
+        "one edit must produce exactly one restart"
+    );
+    h.shutdown().await;
+}
