@@ -32,6 +32,7 @@ pub struct Watcher {
     /// Dropping this stops the OS watch.
     _inner: Box<dyn std::any::Any + Send>,
     rx: mpsc::UnboundedReceiver<BTreeSet<String>>,
+    warnings: Option<mpsc::UnboundedReceiver<String>>,
 }
 
 impl Watcher {
@@ -39,6 +40,37 @@ impl Watcher {
     pub async fn recv(&mut self) -> Option<BTreeSet<String>> {
         self.rx.recv().await
     }
+
+    /// Problems that mean some changes will not be seen, as they happen.
+    ///
+    /// Taken out once, so a dispatch loop can wait on both streams; only this
+    /// receiver leaves, and the guard stays with `recv` as above.
+    pub fn take_warnings(&mut self) -> mpsc::UnboundedReceiver<String> {
+        self.warnings
+            .take()
+            .unwrap_or_else(|| mpsc::unbounded_channel().1)
+    }
+}
+
+/// What to tell someone whose watch just stopped covering part of the tree.
+///
+/// Silence was the old answer, at both places this can happen — a directory
+/// that failed to register at startup was skipped, and the error notify sends
+/// when a directory created later cannot be watched was dropped — so edits there
+/// simply never rebuilt anything (cairn 0089). Only the watch limit is worth a
+/// warning: anything else here is a directory that vanished, which is harmless.
+fn watch_warning(err: &notify::Error) -> Option<String> {
+    if !matches!(err.kind, notify::ErrorKind::MaxFilesWatch) {
+        return None;
+    }
+    let limit = std::fs::read_to_string("/proc/sys/fs/inotify/max_user_watches")
+        .map(|s| format!(" (fs.inotify.max_user_watches = {})", s.trim()))
+        .unwrap_or_default();
+    Some(format!(
+        "the OS file-watch limit is reached{limit}, so edits in some directories will \
+         not be seen. Raise it, e.g. `sudo sysctl fs.inotify.max_user_watches=524288`, \
+         and restart turborust"
+    ))
 }
 
 /// Directories never handed to the OS watcher.
@@ -54,12 +86,22 @@ const NEVER_WATCH: [&str; 7] = [
 
 pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
     let (tx, rx) = mpsc::unbounded_channel();
+    let (warn_tx, warn_rx) = mpsc::unbounded_channel();
     let root_owned = root.to_path_buf();
+    let runtime_warn = warn_tx.clone();
 
     let mut debouncer = new_debouncer(debounce, None, move |res: DebounceEventResult| {
-        // Watch errors (a vanished directory, an exhausted fd limit) are not
-        // worth tearing the dev loop down for; the next batch usually works.
-        let Ok(events) = res else { return };
+        // Errors are not worth tearing the dev loop down for, but the one that
+        // means part of the tree is no longer watched has to be said out loud.
+        let events = match res {
+            Ok(events) => events,
+            Err(errors) => {
+                if let Some(warning) = errors.iter().find_map(watch_warning) {
+                    let _ = runtime_warn.send(warning);
+                }
+                return;
+            }
+        };
         let mut paths: BTreeSet<String> = BTreeSet::new();
         for ev in events {
             // Reading is not changing. inotify reports a file or directory being
@@ -106,9 +148,18 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
         } else {
             RecursiveMode::NonRecursive
         };
-        // A directory vanishing between readdir and watch is not fatal.
-        if debouncer.watch(&path, mode).is_ok() {
-            watched += 1;
+        match debouncer.watch(&path, mode) {
+            Ok(()) => watched += 1,
+            Err(e) => {
+                // Notify registers what it can before giving up, so the rest of
+                // this directory is partly watched; say so once and carry on.
+                if let Some(warning) = watch_warning(&e) {
+                    let _ = warn_tx.send(warning);
+                    watched += 1;
+                }
+                // Anything else is a directory that vanished between readdir and
+                // watch, which is not worth a word.
+            }
         }
     }
     if watched == 0 {
@@ -118,6 +169,7 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
     Ok(Watcher {
         _inner: Box::new(debouncer),
         rx,
+        warnings: Some(warn_rx),
     })
 }
 
@@ -180,6 +232,22 @@ mod tests {
             Some("src/a.rs")
         );
         assert_eq!(relativize(root, Path::new("/elsewhere/a.rs")), None);
+    }
+
+    #[test]
+    fn only_the_watch_limit_is_worth_a_warning() {
+        // Cover for cairn 0089. The limit cannot be lowered from a test, so the
+        // decision is pinned here and the end-to-end path was checked by hand
+        // with `fs.inotify.max_user_watches` lowered.
+        let limit = watch_warning(&notify::Error::new(notify::ErrorKind::MaxFilesWatch))
+            .expect("the watch limit must be reported");
+        assert!(
+            limit.contains("will not be seen") && limit.contains("max_user_watches"),
+            "{limit}"
+        );
+        // A directory that vanished between listing and watching is not news.
+        let vanished = notify::Error::io(std::io::Error::from(std::io::ErrorKind::NotFound));
+        assert_eq!(watch_warning(&vanished), None);
     }
 
     #[test]

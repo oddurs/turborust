@@ -115,9 +115,18 @@ impl Harness {
                     .iter()
                     .map(|(n, s)| format!("{n}={}", s.status.label()))
                     .collect();
+                // The timeline is what explains an intermittent failure; the
+                // final state alone only says that it happened.
+                let log: Vec<String> = st
+                    .logs
+                    .view(None)
+                    .iter()
+                    .map(|l| format!("  {} | {}", l.proc, turborust::proc::strip_ansi(&l.text)))
+                    .collect();
                 panic!(
-                    "timed out waiting for {what}; state was [{}]",
-                    now.join(", ")
+                    "timed out waiting for {what}; state was [{}]\nlog:\n{}",
+                    now.join(", "),
+                    log.join("\n")
                 );
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
