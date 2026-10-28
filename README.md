@@ -200,6 +200,26 @@ not change the build is to make sure the build never saw it. A `loose` task is
 never served from cache — being honestly uncacheable beats being occasionally
 wrong.
 
+Settings that do not belong in a committed file go in a `.env` file, in the same
+`KEY=value` syntax foreman, overmind, Compose and dotenv read (comments, quotes,
+`export` prefixes; no `${VAR}` expansion):
+
+```toml
+[project]
+env_file = ".env"                    # every node
+
+[services.api]
+env_file = [".env.api", { path = ".env.local", required = false }]
+```
+
+Paths are relative to the workspace root. The project's files load first, then
+the node's, then inline `env`, each overriding the last. A missing file is an
+error unless it says `required = false`, so a typo is not a quietly empty
+environment. Files are re-read whenever a node starts, so an edit to `.env`
+applies on the next restart. Their values reach strict tasks, since the file
+declared them, and they key the task: change one and the next run is a miss.
+The key records a hash of each value, never the value itself.
+
 ### What `outputs` promises
 
 `outputs` is a claim that those files are everything the task produces that

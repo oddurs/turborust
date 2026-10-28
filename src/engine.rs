@@ -210,7 +210,7 @@ impl Engine {
             health::exec_probe(
                 cmd,
                 &node.cwd,
-                &self.child_env(node),
+                &self.child_env(node).map_err(|e| e.to_string())?,
                 node.env_mode == EnvMode::Strict,
                 timeout,
             )
@@ -332,7 +332,22 @@ impl Engine {
             "target_dir".to_string(),
             node.target_dir.as_str().to_string(),
         );
+        // Values from env files are not in the config, so the config's hash does
+        // not cover them. Keyed by hash, not value: they are where secrets live,
+        // and `why` prints what changed.
+        let from_files = crate::envfile::load(&node.env_files).map_err(anyhow::Error::msg)?;
+        for (k, v) in &from_files {
+            if !node.env.contains_key(k) {
+                meta.insert(
+                    format!("env_file:{k}"),
+                    blake3::hash(v.as_bytes()).to_hex()[..16].to_string(),
+                );
+            }
+        }
         for k in &node.env_keys {
+            if from_files.contains_key(k) && !node.env.contains_key(k) {
+                continue;
+            }
             let v = node
                 .env
                 .get(k)
@@ -437,7 +452,10 @@ impl Engine {
     /// The environment a node's command actually runs with.
     ///
     /// Under strict mode this is the complete set — the child sees nothing else.
-    fn child_env(&self, node: &Node) -> BTreeMap<String, String> {
+    ///
+    /// Fails only when an env file has gone missing or stopped parsing since the
+    /// plan was built; the failure says which.
+    fn child_env(&self, node: &Node) -> Result<BTreeMap<String, String>> {
         let mut env = BTreeMap::new();
         if node.env_mode == EnvMode::Strict {
             for k in SAFE_BASE_ENV {
@@ -462,11 +480,13 @@ impl Engine {
                 .join(&node.name);
             env.insert("CARGO_TARGET_DIR".into(), dir.to_string_lossy().to_string());
         }
-        // Inline `env` is explicit and always wins.
+        // Env files are declared, so they reach the child under strict mode too;
+        // inline `env` is explicit and wins over them.
+        env.extend(crate::envfile::load(&node.env_files).map_err(anyhow::Error::msg)?);
         for (k, v) in &node.env {
             env.insert(k.clone(), v.clone());
         }
-        env
+        Ok(env)
     }
 
     /// Archives a task's declared outputs, returning what was captured.
@@ -541,7 +561,7 @@ impl Engine {
             name,
             &cmd,
             &node.cwd,
-            &self.child_env(node),
+            &self.child_env(node)?,
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
@@ -698,7 +718,7 @@ impl Engine {
             name,
             &cmd,
             &node.cwd,
-            &self.child_env(&node),
+            &self.child_env(&node)?,
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
@@ -1126,15 +1146,17 @@ async fn supervise(
         // from deadlocking.
         let slot = engine.acquire_slot(&name).await;
         engine.set(&name, Status::Starting);
-        let child_env = engine.child_env(&node);
-        let handle = match proc::spawn_with(
-            &name,
-            &cmd,
-            &node.cwd,
-            &child_env,
-            node.env_mode == EnvMode::Strict,
-            engine.events_tx.clone(),
-        ) {
+        let spawned = engine.child_env(&node).and_then(|child_env| {
+            proc::spawn_with(
+                &name,
+                &cmd,
+                &node.cwd,
+                &child_env,
+                node.env_mode == EnvMode::Strict,
+                engine.events_tx.clone(),
+            )
+        });
+        let handle = match spawned {
             Ok(h) => h,
             Err(e) => {
                 engine.fail(&name, format!("spawn failed: {e:#}"), 127);
@@ -1987,7 +2009,7 @@ mod env_tests {
             std::env::set_var("TR_T1_SECRET", "leak");
         }
         let e = engine_for(&cfg("TR_T1_DECLARED", "TR_T1_PASSED"), "build");
-        let env = e.child_env(e.plan.get("build").unwrap());
+        let env = e.child_env(e.plan.get("build").unwrap()).unwrap();
 
         assert_eq!(env.get("TR_T1_DECLARED").map(String::as_str), Some("yes"));
         assert_eq!(env.get("TR_T1_PASSED").map(String::as_str), Some("yes"));
@@ -1999,6 +2021,101 @@ mod env_tests {
         assert!(env.contains_key("PATH"), "safe base missing from {env:?}");
     }
 
+    /// An engine over its own root, with files written there before the plan
+    /// is resolved — the plan loads env files, so they must exist first.
+    fn engine_in(tag: &str, files: &[(&str, &str)], src: &str, name: &str) -> Arc<Engine> {
+        let root = std::env::temp_dir().join(format!("turborust-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        for (path, text) in files {
+            std::fs::write(root.join(path), text).unwrap();
+        }
+        let ws = Workspace {
+            root,
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: Some(src.to_string()),
+        };
+        let plan = Arc::new(crate::plan::resolve(&ws, &[name.to_string()]).unwrap());
+        let cache = Arc::new(Cache::new(&ws.cache_dir()).unwrap());
+        Engine::new(plan, cache).0
+    }
+
+    #[test]
+    fn env_files_reach_a_strict_child_in_order_and_inline_env_wins() {
+        let src = r#"
+            [project]
+            env_file = ".env"
+            [tasks.build]
+            cmd = "true"
+            inputs = ["x"]
+            env_file = [".env.build", { path = ".env.local", required = false }]
+            env = { INLINE = "inline" }
+        "#;
+        let e = engine_in(
+            "envfile-order",
+            &[
+                (".env", "SHARED=project\nPROJECT=1\nINLINE=file\n"),
+                (".env.build", "SHARED=node\n"),
+            ],
+            src,
+            "build",
+        );
+        let env = e.child_env(e.plan.get("build").unwrap()).unwrap();
+        assert_eq!(env["PROJECT"], "1");
+        assert_eq!(
+            env["SHARED"], "node",
+            "the node's file must override the project's"
+        );
+        assert_eq!(
+            env["INLINE"], "inline",
+            "inline env must override every file"
+        );
+    }
+
+    #[test]
+    fn a_changed_env_file_value_is_a_cache_miss_and_is_never_stored_in_the_clear() {
+        let src = "[tasks.build]\ncmd = \"true\"\ninputs = [\"x\"]\nenv_file = \".env\"";
+        let e = engine_in(
+            "envfile-key",
+            &[(".env", "TOKEN=hunter2\n"), ("x", "")],
+            src,
+            "build",
+        );
+        let node = e.plan.get("build").unwrap().clone();
+        let before = e.fingerprint(&node).unwrap();
+        assert!(
+            !before.meta.values().any(|v| v.contains("hunter2")),
+            "an env file value was written into the key's metadata: {:?}",
+            before.meta
+        );
+
+        std::fs::write(e.plan.root.join(".env"), "TOKEN=hunter3\n").unwrap();
+        let after = e.fingerprint(&node).unwrap();
+        assert_ne!(
+            before.hash, after.hash,
+            "a changed env file value must change the key"
+        );
+        assert!(after.meta.contains_key("env_file:TOKEN"));
+    }
+
+    #[test]
+    fn a_missing_required_env_file_is_refused_with_its_node_and_path() {
+        let src = "[tasks.build]\ncmd = \"true\"\nenv_file = \".env.missing\"";
+        let ws = Workspace {
+            root: std::env::temp_dir().join(format!("turborust-envmiss-{}", std::process::id())),
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: Some(src.to_string()),
+        };
+        let Err(err) = crate::plan::resolve(&ws, &["build".to_string()]) else {
+            panic!("a missing required env file was accepted");
+        };
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("`build`") && msg.contains(".env.missing"),
+            "{msg}"
+        );
+    }
+
     #[test]
     fn a_loose_child_inherits_and_is_therefore_uncacheable() {
         let src = "[tasks.build]\ncmd = \"true\"\ninputs = [\"x\"]\nenv_mode = \"loose\"";
@@ -2006,7 +2123,7 @@ mod env_tests {
         let n = e.plan.get("build").unwrap();
         assert_eq!(n.env_mode, EnvMode::Loose);
         // Loose passes nothing explicit: the child inherits because we never clear.
-        assert!(e.child_env(n).is_empty());
+        assert!(e.child_env(n).unwrap().is_empty());
     }
 
     #[test]

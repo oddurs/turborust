@@ -34,6 +34,47 @@
         "disabled"
       ]
     },
+    "EnvFileEntry": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string"
+        },
+        "required": {
+          "description": "A missing required file is an error, so a typo is not a silently empty\nenvironment. Default `true`.",
+          "type": "boolean",
+          "default": true
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "path"
+      ]
+    },
+    "EnvFileSpec": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "$ref": "#/$defs/EnvFileEntry"
+        }
+      ]
+    },
+    "EnvFiles": {
+      "description": "`\".env\"`, `{ path = \".env.local\", required = false }`, or a list of either.",
+      "anyOf": [
+        {
+          "$ref": "#/$defs/EnvFileSpec"
+        },
+        {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/EnvFileSpec"
+          }
+        }
+      ]
+    },
     "EnvMode": {
       "description": "How much of the ambient environment a task's command may see.\n\nThe default is `strict`, and that is a correctness property rather than a\npreference: the cache key can only account for variables it knows about, so\nthe only way to guarantee an undeclared variable did not change the build is\nto make sure the build never saw it.",
       "oneOf": [
@@ -236,6 +277,17 @@
           ],
           "format": "uint",
           "minimum": 0
+        },
+        "env_file": {
+          "description": "`.env` files loaded into every node, before the node's own. Paths are\nrelative to the workspace root.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvFiles"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "ignore": {
           "description": "Globs excluded from every watcher and every input hash.",
@@ -460,6 +512,17 @@
           },
           "default": {}
         },
+        "env_file": {
+          "description": "`.env` files for this node, after the project's and before inline `env`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvFiles"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "health": {
           "anyOf": [
             {
@@ -662,6 +725,17 @@
             "type": "string"
           },
           "default": {}
+        },
+        "env_file": {
+          "description": "`.env` files for this node, after the project's and before inline `env`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EnvFiles"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "env_keys": {
           "description": "Env vars whose values are folded into the cache key.",
