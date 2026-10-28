@@ -192,6 +192,33 @@ impl Engine {
         self.handles.lock().unwrap().get(name).cloned()
     }
 
+    /// Every declared probe but the log line, which only the event pump sees.
+    ///
+    /// One place for both callers — startup and a self-reload coming back — so
+    /// they cannot disagree about what ready means.
+    async fn probes_pass(&self, node: &Node, h: &crate::config::Health) -> Result<(), String> {
+        if !health::probe(h).await {
+            return Err(match (&h.tcp, &h.http) {
+                (Some(port), _) => format!("nothing answering on port {port}"),
+                (_, Some(url)) => format!("{url} not answering with 2xx/3xx"),
+                _ => "not answering".into(),
+            });
+        }
+        if let Some(cmd) = &h.cmd {
+            let timeout =
+                crate::config::parse_duration(&h.timeout).unwrap_or(Duration::from_secs(5));
+            health::exec_probe(
+                cmd,
+                &node.cwd,
+                &self.child_env(node),
+                node.env_mode == EnvMode::Strict,
+                timeout,
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
     /// Kills every running child's whole process tree at once.
     ///
     /// For the second stop request, which means the orderly shutdown already
@@ -1406,7 +1433,7 @@ impl SelfReload {
             return;
         }
         let probes_pass = match &node.health {
-            Some(h) => health::probe(h).await,
+            Some(h) => engine.probes_pass(node, h).await.is_ok(),
             None => true,
         };
         if ready_again && probes_pass {
@@ -1540,6 +1567,9 @@ async fn probe_until(
     let name = node.name.as_str();
     let interval = crate::config::parse_duration(&h.interval).unwrap_or(Duration::from_millis(300));
     let deadline = tokio::time::Instant::now() + node.ready_timeout;
+    // Why the last attempt failed, said once if the probe gives up: "never
+    // passed" alone sends someone to guess which half of the probe it was.
+    let mut last_failure: Option<String>;
     loop {
         if handle.try_exit_code().is_some() {
             return Ready::No;
@@ -1553,10 +1583,18 @@ async fn probe_until(
                 .get(name)
                 .map(|n| n.log_ready)
                 .unwrap_or(false);
-        if log_ok && health::probe(h).await {
-            return Ready::Yes;
+        if log_ok {
+            match engine.probes_pass(node, h).await {
+                Ok(()) => return Ready::Yes,
+                Err(why) => last_failure = Some(why),
+            }
+        } else {
+            last_failure = h.log.as_ref().map(|l| format!("\"{l}\" not printed yet"));
         }
         if tokio::time::Instant::now() >= deadline {
+            if let Some(why) = last_failure {
+                engine.log(name, format!("last readiness attempt: {why}"));
+            }
             return Ready::No;
         }
 

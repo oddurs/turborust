@@ -7,6 +7,8 @@
 
 use crate::config::Health;
 use anyhow::Result;
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -91,6 +93,70 @@ fn split_url(url: &str) -> Option<(String, u16, String)> {
         return None;
     }
     Some((host, port, path.to_string()))
+}
+
+/// Runs a readiness command; `Ok` on exit 0, otherwise what it said.
+///
+/// Through the same shell a node's own command uses, so a probe reads exactly
+/// like the line someone would type to check by hand. Killed when `timeout`
+/// passes: a probe that hangs — a client waiting on a server that is not up —
+/// must count as "not yet", not stall the supervisor.
+pub async fn exec_probe(
+    cmd: &str,
+    cwd: &Path,
+    env: &BTreeMap<String, String>,
+    isolated: bool,
+    timeout: Duration,
+) -> std::result::Result<(), String> {
+    let mut c = if cfg!(windows) {
+        let mut c = tokio::process::Command::new("cmd");
+        c.arg("/C").arg(cmd);
+        c
+    } else {
+        let mut c = tokio::process::Command::new("/bin/sh");
+        c.arg("-c").arg(cmd);
+        c
+    };
+    if isolated {
+        c.env_clear();
+    }
+    c.current_dir(cwd)
+        .envs(env)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true);
+    let out = match tokio::time::timeout(timeout, c.output()).await {
+        Err(_) => return Err(format!("`{cmd}` did not finish within {timeout:?}")),
+        Ok(Err(e)) => return Err(format!("`{cmd}` could not run: {e}")),
+        Ok(Ok(out)) => out,
+    };
+    if out.status.success() {
+        return Ok(());
+    }
+    // The last few lines are the useful ones: `pg_isready` puts its verdict at
+    // the end, and a whole stack trace is not a readiness message.
+    let text = String::from_utf8_lossy(if out.stderr.is_empty() {
+        &out.stdout
+    } else {
+        &out.stderr
+    })
+    .trim()
+    .lines()
+    .rev()
+    .take(3)
+    .collect::<Vec<_>>()
+    .into_iter()
+    .rev()
+    .collect::<Vec<_>>()
+    .join(" / ");
+    let code = out
+        .status
+        .code()
+        .map_or("a signal".to_string(), |c| format!("exit {c}"));
+    Err(if text.is_empty() {
+        format!("`{cmd}` failed ({code})")
+    } else {
+        format!("`{cmd}` failed ({code}): {text}")
+    })
 }
 
 /// Polls until the probe passes or `timeout` elapses.
@@ -199,6 +265,8 @@ mod tests {
             tcp: None,
             http: Some(format!("http://127.0.0.1:{port}/healthz")),
             log: None,
+            cmd: None,
+            timeout: "5s".into(),
             interval: "50ms".into(),
         };
         assert!(probe(&h).await);

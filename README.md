@@ -262,7 +262,15 @@ doctor` reports what the split is costing on disk.
 health = { tcp = 8788 }                              # connect
 health = { http = "http://127.0.0.1:8788/healthz" }  # any 2xx/3xx
 health = { log = "Serving at" }                      # the process says so
+health = { cmd = "pg_isready -h 127.0.0.1" }         # a command exits 0
 ```
+
+`cmd` is for processes whose port opens before they can do anything: Postgres
+accepts a connection while it is still answering "the database system is
+starting up", so `tcp` passes too early. The command runs with the node's
+environment and working directory, each attempt is cut off after `timeout`
+(default `5s`), and if readiness gives up, the last thing the command said is
+logged.
 
 Every probe a node declares must pass, so `{ tcp = 8788, log = "ready" }` means
 both. The log probe exists for the many dev processes that announce themselves on
