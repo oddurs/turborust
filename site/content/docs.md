@@ -73,6 +73,15 @@ stdout and have no port worth probing.
 is the whole point: a dependent starts only once its dependency answers, and
 stops when that dependency goes down.
 
+Readiness is checked on the way up; `liveness` keeps checking after:
+
+```
+liveness = { http = "http://127.0.0.1:8788/healthz", every = "10s", failures = 3 }
+```
+
+Three misses in a row make the service unhealthy and tell its dependents; an
+answer brings it back. With `restart = "always"` it is restarted instead.
+
 A process that rebuilds itself — `dx serve`, `cargo leptos watch`, `trunk serve`
 — is never restarted for a change, but stays supervised:
 

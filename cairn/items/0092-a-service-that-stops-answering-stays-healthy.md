@@ -2,7 +2,7 @@
 id: 92
 title: A service that stops answering stays healthy
 type: feature
-status: backlog
+status: done
 created: 2026-10-28
 updated: 2026-10-28
 priority: p1
@@ -36,7 +36,32 @@ restart nobody expected.
 
 ## Acceptance criteria
 
-- [ ] A failing liveness probe marks a running node `unhealthy` after `failures` misses, not one
-- [ ] Dependents see it go down, and come back with it
-- [ ] With `restart = "always"` the node is restarted; otherwise it recovers by itself when the probe passes
-- [ ] No probe is run for a node that declares none
+- [x] A failing liveness probe marks a running node `unhealthy` after `failures` misses, not one
+- [x] Dependents see it go down, and come back with it
+- [x] With `restart = "always"` the node is restarted; otherwise it recovers by itself when the probe passes
+- [x] No probe is run for a node that declares none
+
+## 2026-10-28
+
+`liveness = { tcp | http | cmd, every = "10s", failures = 3, timeout = "5s" }`,
+checked on a `tokio::time::interval` inside the supervisor's running loop, so a
+check never runs concurrently with a restart of the same node. Only `failures`
+misses in a row count; one answer resets the count.
+
+Without `restart = "always"` an outage is a state, not an action: the node goes
+`unhealthy`, out of ready, and its dependents wait, exactly as for a stop; the
+next answer brings it back. With it, the node is restarted with the reason
+"not answering (N checks in a row): …". Liveness only restores readiness it
+took away itself (`took_down`), so a failed self-reload stays failed until the
+process says otherwise.
+
+Why an interval and not a `sleep(every)` in the select: the running loop wakes
+for every other branch too, and a fresh sleep would restart each time, so a
+node whose loop is kept busy (a `reload = "self"` node polling its output) would
+never be checked. `liveness_still_runs_beside_a_self_reload_poll` fails with the
+sleep version. Liveness also pauses while such a node is `reloading`, since
+a rebuild is not an outage.
+
+Mutation-checked: never enabled fails 4 tests; acting on the first miss fails
+2; the fresh-sleep version fails the beside-reload test; probing a node that
+declares no liveness fails `a_node_without_liveness_is_never_probed_once_ready`.

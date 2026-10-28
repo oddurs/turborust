@@ -1214,11 +1214,17 @@ async fn supervise(
 
         // 5. Run until the child exits or the mail says otherwise.
         let mut own = SelfReload::new(&engine, &node, ready_flag);
+        let mut alive = Liveness::new(&node);
         let stop_reason = loop {
             tokio::select! {
                 code = wait_exit(&handle) => break StopReason::Exited(code),
                 _ = tokio::time::sleep(own.poll), if own.watching => {
                     own.step(&engine, &node, &ready).await;
+                }
+                _ = alive.tick.tick(), if alive.enabled => {
+                    if let Some(why) = alive.check(&engine, &node, &ready).await {
+                        break StopReason::Restart(why);
+                    }
                 }
                 msg = ctl.recv() => match msg {
                     // The process is watching the same files and rebuilding
@@ -1467,6 +1473,91 @@ impl SelfReload {
                 engine.set(name, Status::Unhealthy);
                 set_reason(engine, name, why);
                 self.phase = Phase::Unready;
+            }
+        }
+    }
+}
+
+/// Keeps checking a running service, because readiness stops looking once it
+/// first passes (cairn 0092).
+///
+/// A persistent interval rather than a sleep in the `select!`: every other
+/// branch firing would restart a sleep, and a self-reloading node polls every
+/// few milliseconds, so the check would never come round.
+struct Liveness {
+    enabled: bool,
+    tick: tokio::time::Interval,
+    misses: u32,
+    /// Set when this check took the node out of ready, so it only puts back
+    /// what it took away — a failed self-reload is not liveness's to clear.
+    took_down: bool,
+}
+
+impl Liveness {
+    fn new(node: &Node) -> Liveness {
+        let every = node
+            .liveness
+            .as_ref()
+            .map(|l| l.every)
+            .unwrap_or(Duration::from_secs(3600));
+        let mut tick = tokio::time::interval_at(tokio::time::Instant::now() + every, every);
+        // A probe that runs long must not be followed by a burst of catch-up checks.
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        Liveness {
+            enabled: node.liveness.is_some(),
+            tick,
+            misses: 0,
+            took_down: false,
+        }
+    }
+
+    /// One check. `Some(reason)` asks the supervisor to restart the node.
+    async fn check(
+        &mut self,
+        engine: &Engine,
+        node: &Node,
+        ready: &watch::Sender<bool>,
+    ) -> Option<String> {
+        let l = node.liveness.as_ref()?;
+        let name = node.name.as_str();
+        // A process rebuilding itself is not expected to answer meanwhile.
+        let rebuilding = engine
+            .state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(name)
+            .is_some_and(|n| matches!(n.status, Status::Reloading));
+        if rebuilding {
+            return None;
+        }
+        match engine.probes_pass(node, &l.probe).await {
+            Ok(()) => {
+                self.misses = 0;
+                if self.took_down {
+                    self.took_down = false;
+                    engine.log(name, "answering again".into());
+                    engine.set(name, Status::Healthy);
+                    set_reason(engine, name, "answering again".into());
+                    ready.send_replace(true);
+                }
+                None
+            }
+            Err(why) => {
+                self.misses += 1;
+                if self.misses != l.failures {
+                    return None;
+                }
+                let why = format!("not answering ({} checks in a row): {why}", self.misses);
+                engine.log(name, why.clone());
+                if node.restart == crate::config::RestartPolicy::Always {
+                    return Some(why);
+                }
+                self.took_down = true;
+                ready.send_replace(false);
+                engine.set(name, Status::Unhealthy);
+                set_reason(engine, name, why);
+                None
             }
         }
     }

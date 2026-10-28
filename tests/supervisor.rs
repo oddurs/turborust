@@ -1074,6 +1074,148 @@ async fn a_failing_probe_says_what_it_said() {
     h.shutdown().await;
 }
 
+// --------------------------------------------------------------- liveness --
+// Cover for cairn 0092: readiness was checked until it first passed and never
+// again, so a server that wedged read healthy forever.
+
+#[tokio::test]
+async fn a_service_that_stops_answering_goes_down_and_comes_back() {
+    let mut h = Harness::start(
+        "liveness",
+        r#"
+        [services.api]
+        cmd = "touch alive; sleep 30"
+        liveness = { cmd = "test -f alive", every = "100ms", failures = 3 }
+        restart = "never"
+
+        [services.web]
+        depends_on = ["api"]
+        cmd = "sleep 30"
+        restart = "never"
+        "#,
+        &["web"],
+    );
+    h.wait_for("both healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+            && matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    let pid = h.pid("api");
+
+    std::fs::remove_file(h.path("alive")).unwrap();
+    h.wait_for("api unhealthy, and web told", |st| {
+        matches!(st.nodes["api"].status, Status::Unhealthy)
+            && matches!(st.nodes["web"].status, Status::Waiting(_))
+    })
+    .await;
+    assert!(
+        h.reason("api")
+            .contains("not answering (3 checks in a row)"),
+        "{}",
+        h.reason("api")
+    );
+    assert_eq!(
+        h.pid("api"),
+        pid,
+        "without restart = always it is not restarted"
+    );
+
+    std::fs::write(h.path("alive"), "").unwrap();
+    h.wait_for("both healthy again", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+            && matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn with_restart_always_a_service_that_stops_answering_is_restarted() {
+    let mut h = Harness::start(
+        "liveness-restart",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        liveness = { cmd = "test -f alive", every = "100ms", failures = 2 }
+        restart = "always"
+        "#,
+        &["api"],
+    );
+    std::fs::write(h.path("alive"), "").unwrap();
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let pid = h.pid("api");
+    std::fs::remove_file(h.path("alive")).unwrap();
+    h.wait_for("a restart", |st| st.nodes["api"].restarts >= 1)
+        .await;
+    std::fs::write(h.path("alive"), "").unwrap();
+    h.wait_for("api healthy as a new process", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy) && st.nodes["api"].pid != pid
+    })
+    .await;
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn one_missed_check_is_not_an_outage() {
+    // Fails exactly once, then answers: below the threshold, nothing happens.
+    let mut h = Harness::start(
+        "liveness-blip",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        liveness = { cmd = "if [ -f blipped ]; then exit 0; fi; touch blipped; exit 1", every = "80ms", failures = 2 }
+        restart = "always"
+        "#,
+        &["api"],
+    );
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert!(h.path("blipped").exists(), "the probe never ran");
+    assert_eq!(
+        h.restarts("api"),
+        0,
+        "one miss below the threshold restarted it"
+    );
+    assert!(matches!(h.status("api"), Status::Healthy));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn liveness_still_runs_beside_a_self_reload_poll() {
+    // The self-reload poll fires every 40ms. Liveness was nearly written as a
+    // sleep inside the same select!, which that poll would reset every time:
+    // the check would never come round.
+    let mut h = Harness::start(
+        "liveness-beside-reload",
+        r#"
+        [services.web]
+        cmd = "touch alive; echo 'server running'; sleep 30"
+        reload = "self"
+        health = { log = "server running", interval = "40ms" }
+        reloading = { log = "rebuilding" }
+        liveness = { cmd = "test -f alive", every = "150ms", failures = 2 }
+        restart = "never"
+        "#,
+        &["web"],
+    );
+    h.wait_for("web healthy", |st| {
+        matches!(st.nodes["web"].status, Status::Healthy)
+    })
+    .await;
+    std::fs::remove_file(h.path("alive")).unwrap();
+    h.wait_for("web unhealthy", |st| {
+        matches!(st.nodes["web"].status, Status::Unhealthy)
+    })
+    .await;
+    h.shutdown().await;
+}
+
 #[tokio::test]
 async fn a_nested_workspace_is_not_restarted_by_being_watched() {
     // Cover for cairn 0088: on Linux, watching a workspace laid out like a real
@@ -1131,6 +1273,40 @@ async fn a_nested_workspace_is_not_restarted_by_being_watched() {
         h.restarts("api"),
         baseline + 1,
         "one edit must produce exactly one restart"
+    );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_node_without_liveness_is_never_probed_once_ready() {
+    // Readiness is a startup check; only a declared `liveness` keeps asking.
+    // Every probe run appends a line, so the count says how often it ran.
+    let mut h = Harness::start(
+        "no-liveness",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        health = { cmd = "echo . >> probes", interval = "50ms" }
+        restart = "never"
+        "#,
+        &["api"],
+    );
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let runs = || {
+        std::fs::read_to_string(h.path("probes"))
+            .unwrap()
+            .lines()
+            .count()
+    };
+    let at_ready = runs();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(
+        runs(),
+        at_ready,
+        "a probe ran after readiness with no liveness declared"
     );
     h.shutdown().await;
 }
