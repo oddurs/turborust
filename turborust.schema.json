@@ -569,6 +569,15 @@
             }
           ]
         },
+        "max_restarts": {
+          "description": "Give up after this many restarts in a row for crashing, and stay failed\nuntil a change or a manual restart. A run that stayed up longer than\n`backoff_max` starts the count again. Default: never give up.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint32",
+          "minimum": 0
+        },
         "on_change": {
           "description": "What a watched-file change does to this service.",
           "$ref": "#/$defs/OnChange"
