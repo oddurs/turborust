@@ -968,16 +968,33 @@ async fn a_nested_workspace_is_not_restarted_by_being_watched() {
         matches!(st.nodes["api"].status, Status::Healthy)
     })
     .await;
-    tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(h.restarts("api"), 0, "nothing was edited");
+    // FSEvents delivers events from just before a stream starts, so on macOS
+    // the fixture's own writes can arrive once after arming. That is not the
+    // bug; the bug never settles. So: wait for quiet, then count from there.
+    let mut baseline = h.restarts("api");
+    let mut quiet = false;
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+        let now = h.restarts("api");
+        if now == baseline {
+            quiet = true;
+            break;
+        }
+        baseline = now;
+    }
+    assert!(
+        quiet,
+        "the watch never went quiet: {baseline} restarts and counting"
+    );
+    assert!(baseline <= 1, "nothing was edited, yet {baseline} restarts");
 
     std::fs::write(h.path("crates/shared/src/lib.rs"), "// one").unwrap();
-    h.wait_for("the restart", |st| st.nodes["api"].restarts >= 1)
+    h.wait_for("the restart", |st| st.nodes["api"].restarts > baseline)
         .await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
     assert_eq!(
         h.restarts("api"),
-        1,
+        baseline + 1,
         "one edit must produce exactly one restart"
     );
     h.shutdown().await;
