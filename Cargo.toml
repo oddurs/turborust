@@ -2,6 +2,9 @@
 name = "turborust"
 version = "0.1.0"
 edition = "2024"
+# The highest any dependency declares (notify-rust). A promise, so CI builds
+# with exactly this toolchain; raise it deliberately, never by accident.
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 description = "A dev orchestrator for full-Rust stacks: supervise, watch, cache, explain."
 repository = "https://github.com/oddurs/turborust"
@@ -10,6 +13,11 @@ keywords = ["cargo", "watch", "dev-server", "monorepo", "supervisor"]
 categories = ["development-tools", "command-line-utilities"]
 # The demo under examples/ is its own cargo workspace, not a cargo example target.
 autoexamples = false
+# An allow-list rather than an exclude list, so a new top-level file is left out
+# until someone decides it belongs. Without one, the crate carried every tracker
+# item, the git hooks and the CI config — 147 files for a build that reads two
+# directories. `assets/` is compiled in by `include_str!`.
+include = ["/src", "/assets", "/README.md", "/LICENSE-MIT", "/LICENSE-APACHE", "/NOTICE.md"]
 
 # Taking our own `turborust doctor` advice. Full DWARF is the largest single
 # contributor to link time, and line tables keep backtraces and panic locations

@@ -1,0 +1,55 @@
+# cargo-deny: advisories, licences, and where crates came from.
+#
+# A dev orchestrator runs on every machine its users build on and spawns their
+# code, so it should not carry a known vulnerability quietly. It is licensed
+# MIT OR Apache-2.0 for people to build on freely, so it should not acquire a
+# copyleft dependency without somebody deciding to. CI runs `cargo deny check`.
+
+[graph]
+# The optional `tls` feature pulls in a TLS stack; it is checked too, because
+# the people who turn it on are the ones exposing a server to a network.
+all-features = true
+
+[advisories]
+yanked = "deny"
+ignore = [
+    # zbus 5's companion crates, merged into zbus 6 and no longer published on
+    # their own. Unmaintained, not vulnerable. They arrive through notify-rust
+    # (desktop notifications, `0054`), whose latest release still depends on
+    # zbus 5. Remove these once notify-rust moves to zbus 6.
+    { id = "RUSTSEC-2026-0370", reason = "zvariant: merged into zbus 6; waiting on notify-rust" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names: merged into zbus 6; waiting on notify-rust" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: merged into zbus 6; waiting on notify-rust" },
+]
+
+[licenses]
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+    # Each of these is required by a crate with no alternative licence, and all
+    # three are permissive: CC0 is a public-domain dedication (notify, the file
+    # watcher); WTFPL is terminfo's, under the TUI; Unicode-DFS-2016 is ANDed
+    # into finl_unicode and wezterm-bidi, so it cannot be chosen away.
+    "CC0-1.0",
+    "Unicode-DFS-2016",
+    "WTFPL",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

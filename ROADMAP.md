@@ -145,7 +145,7 @@ The cache is the load-bearing claim in this project. `why` explains it, the
 
 ## v1.4 — The loop keeps up
 
-`####······` 33% · 2 of 6 done · due 2027-11-01
+`#####·····` 43% · 3 of 7 done · due 2027-11-01
 
 The dev loop moved while this tool was being built.
 
@@ -163,6 +163,7 @@ The dev loop moved while this tool was being built.
 
 - [x] `0085` A stop request from outside kills turborust and orphans its children <sup>bug · p0</sup>
 - [x] `0086` A config mistake runs quietly instead of being refused <sup>bug · p0</sup>
+- [x] `0087` turborust cannot be released or installed safely <sup>chore · p1</sup>
 
 ## later — Not now, not never
 
