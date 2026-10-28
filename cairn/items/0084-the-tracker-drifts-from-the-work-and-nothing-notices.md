@@ -2,8 +2,7 @@
 id: 84
 title: The tracker drifts from the work, and nothing notices
 type: chore
-status: doing
-claimed: 2026-10-28
+status: done
 created: 2026-10-28
 updated: 2026-10-28
 priority: p1
@@ -52,7 +51,7 @@ Close in the branch, and audit what slips through.
 - [x] `docs/git-workflow.md` says to close the item in the branch that finishes it
 - [x] `tests/audit.rs` covers every finding, and fails against the first version
 - [x] CI installs cairn from its real source, pinned, and fails if it cannot
-- [ ] `ROADMAP.md` rendered by the pinned cairn, and the roadmap job green
+- [x] `ROADMAP.md` rendered by the pinned cairn, and the roadmap job green
 
 ## 2026-10-28
 
@@ -77,3 +76,11 @@ Gaps the comparison exposed, now closed: empty sections on an open item (as issu
 The bigger finding was in CI. `cargo install cairn` resolves to an unrelated crate on crates.io ("build-gated version control", v0.0.0) that does not compile, and the step was `continue-on-error`, so the roadmap-in-sync check has been skipped on every run. The tracker's package is `cairn-md`, not yet on crates.io. CI now installs it from `oddurs/cairn` at tag v0.3.0 with `--locked`, and failure is failure. v0.3.0 reads format 2 without migrating: only commands that take the write lock refuse an older format, and `check` and `render` do not. Whether v0.3.0's render is byte-identical to the build that wrote the current `ROADMAP.md` is not yet known; that is the open criterion.
 
 Not adopted: `shellcheck`, the established linter for these scripts, because it could not be installed in the environment that did this work. Worth adding to the lint job.
+
+## 2026-10-28
+
+The open criterion resolved on the first CI run with the real tracker. Pinned v0.3.0 installed, `cairn check` reported `ok: 84 item(s), 0 warning(s)` — which also validates this hand-written item — and `cairn render` differed from the committed `ROADMAP.md` in exactly two hunks, both the changes this branch's items call for. No other byte differed, so v0.3.0 renders identically to the build that wrote the file, and the pin is the right one rather than a guess. The rendered result was applied verbatim from that run's diff (blob `c12c183`, matching the run), not composed by hand.
+
+Closing this item changes the roadmap once more, and cairn could still not run where this was done, so that last change follows the layout v0.3.0 just demonstrated. The roadmap job re-renders and fails on any byte of difference, so it remains the check rather than this note.
+
+Also fixed here, found while starting `0073`: `scripts/agent start <id>` needed cairn only to read the item's title and type, and without it fell through to the freehand form and died with that form's usage error. It now reads the two fields from the item file and says it could not claim. Same theme as the audit — the workflow should not stop working where the tracker cannot be installed.
