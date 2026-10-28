@@ -8,7 +8,8 @@
 
 use crate::cargo::Metadata;
 use crate::config::{
-    CachePolicy, EnvMode, Health, OnChange, ProxyRule, RestartPolicy, Serve, TargetDir, Workspace,
+    CachePolicy, EnvMode, Health, OnChange, ProxyRule, Reload, RestartPolicy, Serve, TargetDir,
+    Workspace,
 };
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +44,9 @@ pub struct Node {
     pub on_change: OnChange,
     /// Parsed signal number for `on_change = "signal"`.
     pub signal: Option<i32>,
+    pub reload: Reload,
+    /// Output marking the start of a rebuild, for `reload = "self"`.
+    pub reloading: Option<String>,
     pub port: Option<u16>,
     pub health: Option<Health>,
     pub serve: Option<Serve>,
@@ -180,7 +184,9 @@ pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
 
     let mut nodes = BTreeMap::new();
     for name in &order {
-        nodes.insert(name.clone(), resolve_node(ws, metadata.as_ref(), name)?);
+        let node = resolve_node(ws, metadata.as_ref(), name)?;
+        check_paths(&node)?;
+        nodes.insert(name.clone(), node);
     }
 
     let mut dependents: BTreeMap<String, Vec<String>> = BTreeMap::new();
@@ -245,6 +251,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         if cmd.is_none() && s.serve.is_none() {
             bail!("service `{name}` has no command");
         }
+        check_reload(name, s)?;
 
         // A declared port with no explicit probe is a readiness signal in itself.
         let health = s
@@ -291,6 +298,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             restart: s.restart,
             on_change: s.on_change,
             signal: s.signal.as_deref().map(parse_signal).transpose()?,
+            reload: s.reload,
+            reloading: s.reloading.as_ref().map(|r| r.log.clone()),
             port: s.port,
             health,
             serve: s.serve.clone(),
@@ -357,6 +366,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         restart: RestartPolicy::Never,
         on_change: OnChange::Restart,
         signal: None,
+        reload: Reload::Restart,
+        reloading: None,
         port: None,
         health: None,
         serve: None,
@@ -388,6 +399,69 @@ fn parse_signal(name: &str) -> Result<i32> {
     })
 }
 
+/// Refuses globs and output paths that cannot mean what they say.
+///
+/// Done here, once, rather than where each is used: a bad glob used to surface
+/// mid-run as a task that exited 1 and printed nothing, and an output outside
+/// the workspace was archived and then *restored* there by a cache hit — a
+/// cache entry writing wherever the path pointed (cairn 0086).
+fn check_paths(node: &Node) -> Result<()> {
+    let name = &node.name;
+    for (field, globs) in [
+        ("inputs", &node.inputs),
+        ("outputs", &node.outputs),
+        ("watch", &node.watch),
+        ("ignore", &node.ignore),
+    ] {
+        // The matcher the run will build, so this accepts exactly what it does.
+        if let Err(e) = crate::cache::Matcher::new(globs, &[]) {
+            bail!("`{name}`: {e:#} in `{field}`");
+        }
+    }
+    for out in &node.outputs {
+        let escapes = out.split(['/', '\\']).any(|seg| seg == "..");
+        let absolute = out.starts_with(['/', '\\']) || out.get(1..2) == Some(":");
+        if escapes || absolute {
+            bail!(
+                "`{name}`: output `{out}` is outside the workspace. Outputs are restored \
+                 from the cache on a hit, so they must stay inside it"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Rejects reload settings that would be silently ignored.
+///
+/// Each of these used to be a way to write a config that looked supervised and
+/// was not, which is the failure `reload = "self"` exists to remove.
+fn check_reload(name: &str, s: &crate::config::Service) -> Result<()> {
+    if s.reload == Reload::Restart {
+        if s.reloading.is_some() {
+            bail!(
+                "service `{name}`: `reloading` only applies with `reload = \"self\"` — \
+                 a service turborust restarts is out of ready from the moment it stops"
+            );
+        }
+        return Ok(());
+    }
+    // `ignore` is accepted because it says the same thing; anything else asks
+    // turborust to act on a change it has been told is not its to act on.
+    if !matches!(s.on_change, OnChange::Restart | OnChange::Ignore) {
+        bail!(
+            "service `{name}`: `on_change` has no effect with `reload = \"self\"`, \
+             because the process rebuilds itself"
+        );
+    }
+    if s.reloading.is_some() && s.health.as_ref().and_then(|h| h.log.as_ref()).is_none() {
+        bail!(
+            "service `{name}`: `reloading` needs `health = {{ log = \"...\" }}`, \
+             which is how a reload is known to have finished"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +474,136 @@ mod tests {
             source: None,
         };
         resolve(&ws, &[]).unwrap()
+    }
+
+    fn plan_err(src: &str) -> String {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: None,
+        };
+        match resolve(&ws, &[]) {
+            Ok(_) => panic!("expected the config to be rejected"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    fn resolve_err(src: &str, target: &str) -> String {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: None,
+        };
+        match resolve(&ws, &[target.to_string()]) {
+            Ok(_) => panic!("expected the config to be rejected"),
+            Err(e) => format!("{e:#}"),
+        }
+    }
+
+    // Cover for cairn 0086: refused at plan time, not discovered mid-run.
+
+    #[test]
+    fn a_bad_glob_is_refused_with_the_field_it_is_in() {
+        for field in ["inputs", "outputs", "ignore"] {
+            let e = resolve_err(
+                &format!("[tasks.a]\ncmd = \"x\"\n{field} = [\"src/[unclosed\"]\n"),
+                "a",
+            );
+            assert!(e.contains("invalid glob `src/[unclosed`"), "{e}");
+            assert!(e.contains(&format!("in `{field}`")), "{e}");
+        }
+        let e = resolve_err("[services.s]\ncmd = \"x\"\nwatch = [\"{a\"]\n", "s");
+        assert!(e.contains("in `watch`"), "{e}");
+    }
+
+    #[test]
+    fn an_output_outside_the_workspace_is_refused() {
+        for out in [
+            "../escape.txt",
+            "dist/../../escape",
+            "/etc/passwd",
+            "C:\\\\x",
+            "..\\\\x",
+        ] {
+            let e = resolve_err(
+                &format!("[tasks.a]\ncmd = \"x\"\noutputs = ['{out}']\n"),
+                "a",
+            );
+            assert!(e.contains("is outside the workspace"), "{out}: {e}");
+        }
+    }
+
+    #[test]
+    fn an_output_that_only_looks_like_it_escapes_is_fine() {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(
+                "[tasks.a]\ncmd = \"x\"\noutputs = [\"dist/**\", \"a..b/x\", \"..hidden\"]\n",
+            )
+            .unwrap(),
+            source: None,
+        };
+        assert!(resolve(&ws, &["a".to_string()]).is_ok());
+    }
+
+    // Cover for cairn 0073: each of these used to be a config that looked
+    // supervised and was not.
+
+    #[test]
+    fn a_self_reloading_service_carries_its_probe_into_the_plan() {
+        let p = plan_from(
+            r#"
+            [services.web]
+            cmd = "dx serve"
+            reload = "self"
+            health = { log = "server running" }
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        let n = p.get("web").unwrap();
+        assert_eq!(n.reload, Reload::SelfManaged);
+        assert_eq!(n.reloading.as_deref(), Some("rebuilding"));
+    }
+
+    #[test]
+    fn reloading_without_reload_self_is_rejected() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            health = { log = "up" }
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        assert!(e.contains("only applies with `reload = \"self\"`"), "{e}");
+    }
+
+    #[test]
+    fn on_change_that_would_be_ignored_is_rejected() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            reload = "self"
+            on_change = "signal"
+            signal = "SIGHUP"
+        "#,
+        );
+        assert!(e.contains("`on_change` has no effect"), "{e}");
+    }
+
+    #[test]
+    fn reloading_needs_a_log_probe_to_know_when_it_finished() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            reload = "self"
+            port = 8080
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        assert!(e.contains("needs `health = { log"), "{e}");
     }
 
     #[test]

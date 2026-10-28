@@ -113,21 +113,31 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The audit reads `Refs:` trailers from the default branch's history.
+          fetch-depth: 0
+      # Drift `cairn check` cannot see: an item left open after its work merged,
+      # a finished milestone never closed. Findings land as annotations on the
+      # item files; only a contradiction fails the job. On a pull request it
+      # also names items the branch refs but leaves open, as changeset-bot
+      # names a missing changeset: a nudge, never a gate.
+      - name: tracker matches the work
+        run: scripts/audit ${{ github.event_name == 'pull_request' && format('--branch {0}', github.event.pull_request.base.sha) || '' }}
       - uses: dtolnay/rust-toolchain@stable
-      # Not every checkout can install the tracker; when it cannot, say so and
-      # move on rather than failing a build for a reason unrelated to the code.
+      # The package is `cairn-md`, from its own repository. `cargo install cairn`
+      # resolves to an unrelated crate on crates.io that does not compile, and
+      # because this step used to be allowed to fail, the roadmap check below
+      # was skipped on every run without anyone being told.
+      #
+      # Pinned to a tag, with --locked, so a cairn release cannot change what
+      # this job means. v0.3.0 reads this format-2 project as is: `check` and
+      # `render` never take the write lock that asks for `cairn migrate`.
       - name: install cairn
-        id: cairn
-        continue-on-error: true
-        run: cargo install cairn --locked
+        run: cargo install --locked --git https://github.com/oddurs/cairn --tag v0.3.0 cairn-md
       # A roadmap that has drifted from its items is the rot cairn exists to
       # prevent, so the check belongs in CI rather than in discipline.
       - name: roadmap validates and is up to date
-        if: steps.cairn.outcome == 'success'
         run: |
           cairn check
           cairn render
           git diff --exit-code ROADMAP.md
-      - name: skipped
-        if: steps.cairn.outcome != 'success'
-        run: echo "::notice::cairn unavailable; roadmap check skipped"

@@ -72,6 +72,19 @@ stdout and have no port worth probing.
 is the whole point: a dependent starts only once its dependency answers, and
 stops when that dependency goes down.
 
+A process that rebuilds itself — `dx serve`, `cargo leptos watch`, `trunk serve`
+— is never restarted for a change, but stays supervised:
+
+```
+reload    = "self"
+health    = { log = "<ready line>" }
+reloading = { log = "<rebuild line>" }
+```
+
+A rebuild takes it out of ready and tells its dependents, as a restart would; the
+ready line brings it back. A rustc error makes it unhealthy at once, with the
+error in the overlay.
+
 ## The cache
 
 The key is a blake3 hash over input file contents, the command, declared

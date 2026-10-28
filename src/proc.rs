@@ -117,6 +117,16 @@ impl Handle {
             }
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
+        self.kill_now();
+        Ok(())
+    }
+
+    /// Ends the child and everything it spawned, without waiting for anything.
+    ///
+    /// The escalation at the end of `stop`, and on its own the answer to a
+    /// second stop request: by then nobody is willing to wait out a grace
+    /// period, and anything left alive would be an orphan.
+    pub fn kill_now(&self) {
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
@@ -133,7 +143,6 @@ impl Handle {
         }
         let mut c = self.child.lock().unwrap();
         let _ = c.kill();
-        Ok(())
     }
 
     /// Sends a signal to the child's process group without stopping it.
@@ -220,6 +229,13 @@ pub fn spawn_with(
     isolated: bool,
     events: mpsc::UnboundedSender<ProcEvent>,
 ) -> Result<Handle> {
+    // The pty library falls back to the home directory when `cwd` does not
+    // exist, so a typo in `cwd` ran the command somewhere else entirely — a
+    // `rm -rf build` in $HOME. Checked here, at the last moment, because a
+    // dependency may be what creates the directory (cairn 0086).
+    if !cwd.is_dir() {
+        anyhow::bail!("working directory `{}` does not exist", cwd.display());
+    }
     let pty = native_pty_system();
     let pair = pty
         .openpty(PtySize {

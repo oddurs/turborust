@@ -8,7 +8,7 @@
 //! back in dependency order.
 
 use crate::cache::{self, Cache, Fingerprint, Record};
-use crate::config::{EnvMode, OnChange, SAFE_BASE_ENV, TargetDir};
+use crate::config::{EnvMode, OnChange, Reload, SAFE_BASE_ENV, TargetDir};
 use crate::ctl;
 pub use crate::ctl::Ctl;
 
@@ -121,6 +121,8 @@ impl Engine {
                     .and_then(|n| n.health.as_ref())
                     .and_then(|h| h.log.clone());
                 st.set_ready_pattern(name, pattern);
+                let reloading = plan.get(name).ok().and_then(|n| n.reloading.clone());
+                st.set_reload_pattern(name, reloading);
             }
         }
         let engine = Arc::new(Engine {
@@ -172,9 +174,32 @@ impl Engine {
         self.handles.lock().unwrap().remove(name);
     }
 
+    /// Waits for a task's child, published for as long as it runs.
+    ///
+    /// Only services used to be published, so nothing could reach a task
+    /// mid-run: shutdown waited out its stop timeout and exited with the task
+    /// still going, and a forced stop could not kill it (cairn 0085).
+    async fn wait_registered(&self, name: &str, handle: Handle) -> i32 {
+        let handle = Arc::new(handle);
+        self.register_handle(name, handle.clone());
+        let code = wait_exit(&handle).await;
+        self.forget_handle(name);
+        code
+    }
+
     /// The running child for `name`, if there is one.
     pub fn handle_for(&self, name: &str) -> Option<Arc<Handle>> {
         self.handles.lock().unwrap().get(name).cloned()
+    }
+
+    /// Kills every running child's whole process tree at once.
+    ///
+    /// For the second stop request, which means the orderly shutdown already
+    /// under way is taking too long. Nothing is waited for.
+    pub fn kill_all(&self) {
+        for handle in self.handles.lock().unwrap().values() {
+            handle.kill_now();
+        }
     }
 
     pub fn node_names(&self) -> Vec<String> {
@@ -234,7 +259,7 @@ impl Engine {
         }
         // Only health transitions are notified; see the notifier for why.
         let health = match status {
-            Status::Failed(_) => Some(true),
+            Status::Failed(_) | Status::Unhealthy => Some(true),
             Status::Healthy | Status::Done { .. } => Some(false),
             _ => None,
         };
@@ -493,7 +518,7 @@ impl Engine {
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
-        if wait_exit(&handle).await != 0 {
+        if self.wait_registered(name, handle).await != 0 {
             // The task cannot be re-run right now. That is a problem, but it is
             // not evidence the stored result was wrong.
             return Ok(Some(format!(
@@ -650,7 +675,7 @@ impl Engine {
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
-        let code = wait_exit(&handle).await;
+        let code = self.wait_registered(name, handle).await;
         let duration = start.elapsed();
 
         if code == 0 {
@@ -680,6 +705,10 @@ impl Engine {
                     output_hash,
                 });
             }
+        } else if self.state.lock().unwrap().shutting_down {
+            // Ended by the shutdown, not by its own failure: reporting it as
+            // failed would raise a failure notification for a ctrl-c.
+            self.set(name, Status::Stopped);
         } else {
             self.set(name, Status::Failed(code));
         }
@@ -689,6 +718,22 @@ impl Engine {
             duration,
             fingerprint: fp,
         })
+    }
+
+    /// A node failed before it had a process to fail with — a spawn that did
+    /// not happen, a fingerprint that could not be taken.
+    ///
+    /// The reporter only shows a node's output once that node finishes, and
+    /// "finishes" used to mean a process exiting. With no process there was no
+    /// exit, so the reason sat in a buffer nobody flushed: `run` exited 1 and
+    /// printed nothing (cairn 0086).
+    fn fail(&self, name: &str, error: String, code: i32) {
+        self.log(name, error.clone());
+        let _ = self.events_tx.send(ProcEvent::Failed {
+            proc: name.to_string(),
+            error,
+        });
+        self.set(name, Status::Failed(code));
     }
 
     fn log(&self, proc: &str, text: String) {
@@ -713,6 +758,19 @@ pub async fn run_once(engine: Arc<Engine>) -> Result<i32> {
 
 /// One-shot run. With `keep_going`, a failure stops only what depends on it.
 pub async fn run_once_with(engine: Arc<Engine>, keep_going: bool) -> Result<i32> {
+    run_once_until(engine, keep_going, std::future::pending()).await
+}
+
+/// One-shot run that `stop` can end early, with the exit code it resolves to.
+///
+/// An early end still goes through the full shutdown — reverse dependency
+/// order, each node's stop timeout — because skipping it is what orphaned the
+/// children of an interrupted `run` (cairn 0085).
+pub async fn run_once_until(
+    engine: Arc<Engine>,
+    keep_going: bool,
+    stop: impl std::future::Future<Output = i32>,
+) -> Result<i32> {
     let tasks: Vec<String> = engine
         .plan
         .order
@@ -731,10 +789,16 @@ pub async fn run_once_with(engine: Arc<Engine>, keep_going: bool) -> Result<i32>
     }
 
     let (wires, supervisors) = spawn_supervisors(engine.clone());
-    let code = if keep_going {
-        await_all_tasks(&engine, &tasks).await
-    } else {
-        await_tasks(&engine, &tasks).await
+    let finished = async {
+        if keep_going {
+            await_all_tasks(&engine, &tasks).await
+        } else {
+            await_tasks(&engine, &tasks).await
+        }
+    };
+    let code = tokio::select! {
+        code = finished => code,
+        code = stop => code,
     };
     shutdown(&engine, &wires, supervisors).await;
     Ok(code)
@@ -830,7 +894,10 @@ async fn await_tasks(engine: &Engine, tasks: &[String]) -> i32 {
             // crashed dependency is a failure, not something to ride out.
             let dead = st.nodes.iter().find_map(|(name, node)| {
                 (node.kind == "service"
-                    && matches!(node.status, Status::Failed(_) | Status::Backoff(_)))
+                    && matches!(
+                        node.status,
+                        Status::Failed(_) | Status::Backoff(_) | Status::Unhealthy
+                    ))
                 .then(|| name.clone())
             });
 
@@ -979,8 +1046,7 @@ async fn supervise(
             let outcome = match engine.run_task(&name, false).await {
                 Ok(o) => o,
                 Err(e) => {
-                    engine.log(&name, format!("error: {e}"));
-                    engine.set(&name, Status::Failed(1));
+                    engine.fail(&name, format!("error: {e:#}"), 1);
                     TaskOutcome {
                         cached: false,
                         code: 1,
@@ -1044,8 +1110,7 @@ async fn supervise(
         ) {
             Ok(h) => h,
             Err(e) => {
-                engine.log(&name, format!("spawn failed: {e}"));
-                engine.set(&name, Status::Failed(127));
+                engine.fail(&name, format!("spawn failed: {e:#}"), 127);
                 if node.restart == crate::config::RestartPolicy::Never {
                     return;
                 }
@@ -1078,14 +1143,26 @@ async fn supervise(
                     true
                 }
                 Ready::No => {
+                    // Not `Starting`: nothing is starting any more, and a node
+                    // left reading that way kept a one-shot `run` waiting on it
+                    // forever.
                     engine.log(&name, "readiness probe never passed".into());
+                    engine.set(&name, Status::Unhealthy);
+                    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
+                        n.reason = Some(format!(
+                            "not ready within {}",
+                            crate::state::fmt_dur(node.ready_timeout)
+                        ));
+                    }
                     false
                 }
                 Ready::Interrupted(Ctl::Stop) => {
                     engine.set(&name, Status::Stopped);
                     ready.send_replace(false);
-                    engine.forget_handle(&name);
+                    // Unpublished only once it is gone: a forced stop during the grace
+                    // period finds children through the published handles (cairn 0085).
                     let _ = handle.stop(node.stop_timeout).await;
+                    engine.forget_handle(&name);
                     return;
                 }
                 Ready::Interrupted(other) => {
@@ -1096,8 +1173,8 @@ async fn supervise(
                     };
                     engine.log(&name, format!("restarting mid-startup: {reason}"));
                     ready.send_replace(false);
-                    engine.forget_handle(&name);
                     let _ = handle.stop(node.stop_timeout).await;
+                    engine.forget_handle(&name);
                     continue;
                 }
             },
@@ -1109,10 +1186,17 @@ async fn supervise(
         }
 
         // 5. Run until the child exits or the mail says otherwise.
+        let mut own = SelfReload::new(&engine, &node, ready_flag);
         let stop_reason = loop {
             tokio::select! {
                 code = wait_exit(&handle) => break StopReason::Exited(code),
+                _ = tokio::time::sleep(own.poll), if own.watching => {
+                    own.step(&engine, &node, &ready).await;
+                }
                 msg = ctl.recv() => match msg {
+                    // The process is watching the same files and rebuilding
+                    // itself; a restart now would throw away what it keeps.
+                    Some(Ctl::Restart(_)) if node.reload == Reload::SelfManaged => continue,
                     Some(Ctl::Restart(r)) => match node.on_change {
                         OnChange::Ignore => continue,
                         OnChange::Signal => {
@@ -1152,8 +1236,8 @@ async fn supervise(
         match stop_reason {
             StopReason::Stop => {
                 engine.set(&name, Status::Stopped);
-                engine.forget_handle(&name);
                 let _ = handle.stop(node.stop_timeout).await;
+                engine.forget_handle(&name);
                 return;
             }
             StopReason::Restart(reason) | StopReason::DepDown(reason) => {
@@ -1165,8 +1249,8 @@ async fn supervise(
                     }
                 }
                 engine.log(&name, format!("restarting: {reason}"));
-                engine.forget_handle(&name);
                 let _ = handle.stop(node.stop_timeout).await;
+                engine.forget_handle(&name);
                 backoff = node.backoff_min;
                 continue;
             }
@@ -1226,6 +1310,145 @@ enum StopReason {
     Restart(String),
     DepDown(String),
     Stop,
+}
+
+/// Follows a `reload = "self"` node through the rebuilds it runs itself.
+///
+/// The supervisor never restarts such a node for a change, so without this it
+/// would read healthy straight through a failing rebuild and tell its
+/// dependents nothing. This is readiness for a process that does not restart:
+/// `reloading` is the edge out of ready, `health` the edge back in, and the
+/// usual cascade runs on both.
+///
+/// Driven by polling the match counters the event pump keeps, at the probe
+/// interval — the same way the startup probe watches for its log line.
+struct SelfReload {
+    poll: Duration,
+    /// False for nodes with nothing to follow.
+    watching: bool,
+    /// `reload_matches` already acted on.
+    seen: u64,
+    phase: Phase,
+}
+
+enum Phase {
+    Ready,
+    Rebuilding {
+        deadline: tokio::time::Instant,
+    },
+    /// Out of ready, and waiting for the process to recover by itself — which a
+    /// self-reloading process does, on the next edit that compiles.
+    Unready,
+}
+
+impl SelfReload {
+    fn new(engine: &Engine, node: &Node, ready: bool) -> SelfReload {
+        // Rebuilds announced during the first build belong to startup, which
+        // the probe has already accounted for — unless one came after the last
+        // ready line. The probe only looks every `interval`, so a rebuild can
+        // already be under way by the time startup is confirmed; leaving the
+        // latest one unseen makes the first step pick it up.
+        let seen = engine
+            .state
+            .lock()
+            .unwrap()
+            .nodes
+            .get(&node.name)
+            .map(|n| {
+                let in_flight =
+                    n.reload_matches > 0 && n.ready_matches_at_reload == n.ready_matches;
+                n.reload_matches - u64::from(in_flight)
+            })
+            .unwrap_or(0);
+        let poll = node
+            .health
+            .as_ref()
+            .and_then(|h| crate::config::parse_duration(&h.interval).ok())
+            .unwrap_or(Duration::from_millis(300));
+        SelfReload {
+            poll,
+            watching: node.reload == Reload::SelfManaged && node.reloading.is_some(),
+            seen,
+            // A first build slower than `ready_timeout` is common for exactly
+            // these processes; it should come good when it finishes, not stay
+            // unhealthy until restarted.
+            phase: if ready { Phase::Ready } else { Phase::Unready },
+        }
+    }
+
+    async fn step(&mut self, engine: &Engine, node: &Node, ready: &watch::Sender<bool>) {
+        let name = node.name.as_str();
+        let Some((reloads, ready_again, errors)) =
+            engine.state.lock().unwrap().nodes.get(name).map(|n| {
+                (
+                    n.reload_matches,
+                    n.ready_matches > n.ready_matches_at_reload,
+                    n.diag.errors(),
+                )
+            })
+        else {
+            return;
+        };
+
+        if reloads != self.seen {
+            self.seen = reloads;
+            // The down edge, without a restart: dependents are told exactly as
+            // they would be if this node had been stopped and started.
+            ready.send_replace(false);
+            engine.set(name, Status::Reloading);
+            set_reason(engine, name, "rebuilding itself".into());
+            self.phase = Phase::Rebuilding {
+                deadline: tokio::time::Instant::now() + node.ready_timeout,
+            };
+        }
+
+        if matches!(self.phase, Phase::Ready) {
+            return;
+        }
+        let probes_pass = match &node.health {
+            Some(h) => health::probe(h).await,
+            None => true,
+        };
+        if ready_again && probes_pass {
+            engine.set(name, Status::Healthy);
+            set_reason(engine, name, "reloaded itself".into());
+            ready.send_replace(true);
+            // Deliberately no browser reload: the process has just patched
+            // itself in place, and a full reload would discard the state it
+            // went to the trouble of keeping.
+            self.phase = Phase::Ready;
+            return;
+        }
+        if let Phase::Rebuilding { deadline } = self.phase {
+            let failure = if errors > 0 {
+                // rustc has already said how this ends; waiting out the
+                // timeout would only delay saying so.
+                Some(format!(
+                    "rebuild failed with {errors} error{}",
+                    if errors == 1 { "" } else { "s" }
+                ))
+            } else if tokio::time::Instant::now() >= deadline {
+                Some(format!(
+                    "rebuild did not finish within {}",
+                    crate::state::fmt_dur(node.ready_timeout)
+                ))
+            } else {
+                None
+            };
+            if let Some(why) = failure {
+                engine.log(name, format!("reload failed: {why}"));
+                engine.set(name, Status::Unhealthy);
+                set_reason(engine, name, why);
+                self.phase = Phase::Unready;
+            }
+        }
+    }
+}
+
+fn set_reason(engine: &Engine, name: &str, reason: String) {
+    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(name) {
+        n.reason = Some(reason);
+    }
 }
 
 /// Waits for every dependency to report ready. `false` means shut down instead.
@@ -1344,7 +1567,9 @@ async fn probe_until(
             _ = tokio::time::sleep(interval) => {}
             msg = ctl.recv() => match msg {
                 Some(Ctl::Stop) | None => return Ready::Interrupted(Ctl::Stop),
-                Some(Ctl::Restart(r)) if node.on_change == OnChange::Restart => {
+                Some(Ctl::Restart(r))
+                    if node.on_change == OnChange::Restart && node.reload == Reload::Restart =>
+                {
                     return Ready::Interrupted(Ctl::Restart(r));
                 }
                 Some(Ctl::DepDown(d)) => return Ready::Interrupted(Ctl::DepDown(d)),
@@ -1402,12 +1627,25 @@ pub async fn pump_events_with(
                         {
                             n.diag.reset();
                         }
+                        // A self-managed rebuild starting. Checked before readiness,
+                        // so a line that is both reads as a rebuild that finished.
+                        if let Some(pattern) = &n.reload_pattern
+                            && plain.contains(pattern.as_str())
+                        {
+                            n.reload_matches += 1;
+                            n.ready_matches_at_reload = n.ready_matches;
+                            // Here rather than when the supervisor next looks: the
+                            // errors this rebuild prints may already be on their
+                            // way, and resetting later would throw them away.
+                            n.diag.reset();
+                        }
                         // Readiness by announcement: matched on stripped text, so
                         // a colourised "Listening on ..." still counts.
                         if let Some(pattern) = &n.ready_pattern
                             && plain.contains(pattern.as_str())
                         {
                             n.log_ready = true;
+                            n.ready_matches += 1;
                         }
                         n.diag.push_line(&line.text);
                     }
@@ -1459,12 +1697,20 @@ pub async fn shutdown(
         let Some(handle) = supervisors.remove(name) else {
             continue;
         };
-        let grace = engine
+        let stop_timeout = engine
             .plan
             .get(name)
             .map(|n| n.stop_timeout)
-            .unwrap_or(Duration::from_secs(8))
-            + Duration::from_secs(2);
+            .unwrap_or(Duration::from_secs(8));
+        // A task mid-run is waiting on its child, not reading its mail. Ending
+        // the child is what lets its supervisor see the Stop at all; without
+        // this the wait below timed out and the task was left running.
+        if engine.plan.get(name).is_ok_and(|n| n.kind == Kind::Task)
+            && let Some(child) = engine.handle_for(name)
+        {
+            let _ = child.stop(stop_timeout).await;
+        }
+        let grace = stop_timeout + Duration::from_secs(2);
         if tokio::time::timeout(grace, handle).await.is_err() {
             engine.log(
                 name,

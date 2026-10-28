@@ -73,7 +73,7 @@ cairn render                      # regenerate ROADMAP.md
 scripts/setup                install hooks and the commit template (once, per clone)
 scripts/agent new <type> "…" file a tracker item and branch for it in one step
 scripts/agent start <id>     worktree + branch + claim the item
-scripts/agent check          formatter, linter, tests, roadmap
+scripts/agent check          formatter, linter, tests, roadmap, tracker
 scripts/agent commit "<msg>" conventional commit with a Refs trailer
 scripts/agent pr             push and open a pull request
 scripts/agent clean          remove worktrees whose branch has merged
