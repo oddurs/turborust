@@ -95,6 +95,10 @@ A rebuild takes it out of ready and tells its dependents, as a restart would; th
 ready line brings it back. A rustc error makes it unhealthy at once, with the
 error in the overlay.
 
+On a filesystem that delivers no change events (Docker bind mounts, WSL2's
+`/mnt/c`, NFS, SMB), `[project] watch = { poll = "500ms" }` or `up --poll` scans
+for changes instead, and `doctor` says when you need it.
+
 ## The cache
 
 The key is a blake3 hash over input file contents, the command, declared

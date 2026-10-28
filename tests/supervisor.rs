@@ -73,7 +73,12 @@ impl Harness {
 
     /// Also route filesystem changes, as `turborust up` does.
     fn with_watcher(self) -> Self {
-        let w = turborust::watch::watch(&self.dir, Duration::from_millis(60)).unwrap();
+        self.with_backend(turborust::watch::Backend::Native)
+    }
+
+    fn with_backend(self, backend: turborust::watch::Backend) -> Self {
+        let w =
+            turborust::watch::watch_with(&self.dir, Duration::from_millis(60), backend).unwrap();
         engine::spawn_watch_dispatch(
             w,
             self.engine.clone(),
@@ -1308,5 +1313,36 @@ async fn a_node_without_liveness_is_never_probed_once_ready() {
         at_ready,
         "a probe ran after readiness with no liveness declared"
     );
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn with_polling_an_edit_restarts_its_service_once() {
+    // Cover for cairn 0094: the polling backend feeds the same dispatch as the
+    // native one, so a change found by scanning restarts exactly what an event
+    // would have.
+    let mut h = Harness::start(
+        "poll",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        watch = ["src/**"]
+        debounce = "60ms"
+        "#,
+        &["api"],
+    )
+    .seed("src")
+    .with_backend(turborust::watch::Backend::Poll(Duration::from_millis(100)));
+
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let before = h.restarts("api");
+    std::fs::write(h.path("src/a.rs"), "// one").unwrap();
+    h.wait_for("the restart", |st| st.nodes["api"].restarts > before)
+        .await;
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(h.restarts("api"), before + 1, "one edit, one restart");
     h.shutdown().await;
 }

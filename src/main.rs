@@ -40,6 +40,11 @@ enum Cmd {
         /// Stream logs to stdout instead of opening the TUI.
         #[arg(long)]
         no_tui: bool,
+        /// Scan for changes instead of waiting for OS file events, every
+        /// INTERVAL (default 500ms). For Docker bind mounts, WSL2's /mnt/c,
+        /// NFS and SMB, which deliver no events.
+        #[arg(long, value_name = "INTERVAL", num_args = 0..=1, default_missing_value = "500ms")]
+        poll: Option<String>,
     },
     /// Run tasks once, in dependency order, honouring the cache.
     Run {
@@ -153,6 +158,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         targets: vec![],
         filter: vec![],
         no_tui: false,
+        poll: None,
     }) {
         Cmd::Init => cmd_init(),
         Cmd::Doctor { fix } => cmd_doctor(cli.config.as_deref(), fix),
@@ -229,7 +235,8 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             targets,
             filter,
             no_tui,
-        } => cmd_up(cli.config.as_deref(), targets, filter, no_tui).await,
+            poll,
+        } => cmd_up(cli.config.as_deref(), targets, filter, no_tui, poll).await,
     }
 }
 
@@ -321,7 +328,12 @@ fn cmd_doctor(config: Option<&std::path::Path>, fix: bool) -> Result<i32> {
         "\n\u{1b}[1mturborust doctor\u{1b}[0m  \u{1b}[2m{}\u{1b}[0m",
         root.display()
     );
-    let findings = doctor::diagnose_with(&root, meta.as_ref(), &split);
+    let mut findings = doctor::diagnose_with(&root, meta.as_ref(), &split);
+    let polling = load(config)
+        .ok()
+        .and_then(|ws| ws.config.project.watch?.poll)
+        .is_some();
+    findings.extend(doctor::check_watch_events(&root, polling));
     doctor::print(&findings);
     if fix {
         let n = doctor::fix_interactively(&root, &findings);
@@ -708,11 +720,21 @@ async fn cmd_up(
     targets: Vec<String>,
     filter: Vec<String>,
     no_tui: bool,
+    poll: Option<String>,
 ) -> Result<i32> {
     let ws = load(config)?;
     let targets = select(&ws, targets, &filter)?;
-    let watcher =
-        watch::watch(&ws.root, Duration::from_millis(120)).context("starting file watcher")?;
+    // The flag wins over the config, so a one-off session on a mounted volume
+    // needs no edit to a committed file.
+    let poll = poll.or_else(|| ws.config.project.watch.as_ref()?.poll.clone());
+    let backend = match &poll {
+        Some(p) => watch::Backend::Poll(
+            turborust::config::poll_interval(p).context("--poll / project.watch.poll")?,
+        ),
+        None => watch::Backend::Native,
+    };
+    let watcher = watch::watch_with(&ws.root, Duration::from_millis(120), backend)
+        .context("starting file watcher")?;
     let plan = Arc::new(plan::resolve(&ws, &targets)?);
     let cache = Arc::new(open_cache(&ws)?);
     let (engine, rx) = Engine::new_verifying(plan.clone(), cache, ws.config.cache.verify);

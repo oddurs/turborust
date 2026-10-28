@@ -315,6 +315,17 @@
           "description": "Show a desktop notification when a node fails or recovers.",
           "type": "boolean",
           "default": false
+        },
+        "watch": {
+          "description": "How the workspace is watched for changes.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/WatchConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false
@@ -837,6 +848,19 @@
           "const": "always"
         }
       ]
+    },
+    "WatchConfig": {
+      "type": "object",
+      "properties": {
+        "poll": {
+          "description": "Scan for changes at this interval instead of waiting for OS events, for\nfilesystems that deliver none: Docker Desktop bind mounts, WSL2's\n`/mnt/c`, NFS, SMB. `turborust doctor` says when you are on one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

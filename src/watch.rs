@@ -11,7 +11,9 @@
 
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
-use notify_debouncer_full::{DebounceEventResult, new_debouncer};
+use notify_debouncer_full::{
+    DebounceEventResult, DebouncedEvent, Debouncer, FileIdCache, new_debouncer,
+};
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::time::Duration;
@@ -84,13 +86,29 @@ const NEVER_WATCH: [&str; 7] = [
     ".direnv",
 ];
 
+/// Where change notifications come from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Backend {
+    /// The OS's own events: inotify, FSEvents, ReadDirectoryChangesW.
+    Native,
+    /// Scanning the tree at this interval, for filesystems that deliver no
+    /// events — Docker Desktop bind mounts, WSL2's `/mnt/c`, NFS, SMB.
+    Poll(Duration),
+}
+
 pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
+    watch_with(root, debounce, Backend::Native)
+}
+
+/// Watches with the chosen backend. Both feed the same callback, so dispatch,
+/// debouncing and the access-event filter are one piece of code, not two.
+pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<Watcher> {
     let (tx, rx) = mpsc::unbounded_channel();
     let (warn_tx, warn_rx) = mpsc::unbounded_channel();
     let root_owned = root.to_path_buf();
     let runtime_warn = warn_tx.clone();
 
-    let mut debouncer = new_debouncer(debounce, None, move |res: DebounceEventResult| {
+    let handler = move |res: DebounceEventResult| {
         // Errors are not worth tearing the dev loop down for, but the one that
         // means part of the tree is no longer watched has to be said out loud.
         let events = match res {
@@ -130,9 +148,151 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
         if !paths.is_empty() {
             let _ = tx.send(paths);
         }
-    })
-    .context("creating filesystem watcher")?;
+    };
 
+    let inner: Box<dyn std::any::Any + Send> = match backend {
+        Backend::Native => {
+            let mut d =
+                new_debouncer(debounce, None, handler).context("creating filesystem watcher")?;
+            register(&mut d, root, &warn_tx)?;
+            Box::new(d)
+        }
+        Backend::Poll(every) => Box::new(Poller::start(root, every, handler)?),
+    };
+
+    Ok(Watcher {
+        _inner: inner,
+        rx,
+        warnings: Some(warn_rx),
+    })
+}
+
+/// A scan of the tree every interval, for where OS events never arrive.
+///
+/// Not notify's `PollWatcher`: that one compares modification times in whole
+/// seconds, so a second save within the same second as the first was never
+/// seen at all — and its alternative, hashing every file on every scan, is the
+/// wrong cost on exactly the network filesystems polling exists for. Here a
+/// file is its full-precision mtime and its length.
+///
+/// The first scan happens before `start` returns, so an edit made the moment it
+/// does is a change against that baseline rather than part of it.
+struct Poller {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+type Snapshot =
+    std::collections::BTreeMap<std::path::PathBuf, (Option<std::time::SystemTime>, u64)>;
+
+impl Poller {
+    fn start<F>(root: &Path, every: Duration, mut handler: F) -> Result<Poller>
+    where
+        F: FnMut(DebounceEventResult) + Send + 'static,
+    {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let root = root.to_path_buf();
+        let mut before = scan(&root)?;
+        let stop = std::sync::Arc::new(AtomicBool::new(false));
+        let stopped = stop.clone();
+        std::thread::Builder::new()
+            .name("turborust poll".into())
+            .spawn(move || {
+                while !stopped.load(Ordering::Relaxed) {
+                    std::thread::sleep(every);
+                    let Ok(now) = scan(&root) else { continue };
+                    let changed = diff(&before, &now);
+                    before = now;
+                    if changed.is_empty() || stopped.load(Ordering::Relaxed) {
+                        continue;
+                    }
+                    let at = std::time::Instant::now();
+                    let events = changed
+                        .into_iter()
+                        .map(|(path, kind)| {
+                            DebouncedEvent::new(notify::Event::new(kind).add_path(path), at)
+                        })
+                        .collect();
+                    handler(Ok(events));
+                }
+            })
+            .context("starting the polling thread")?;
+        Ok(Poller { stop })
+    }
+}
+
+impl Drop for Poller {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Every file under the watched top-level entries. Never-watched directories
+/// are skipped at the top, as the native watcher skips them, and `.git`,
+/// `target` and `node_modules` at any depth, since walking them on every scan
+/// would cost more than everything else together. Symlinked directories are
+/// not followed, so a link cycle cannot make a scan endless.
+fn scan(root: &Path) -> Result<Snapshot> {
+    const NEVER_DEEP: [&str; 3] = [".git", "target", "node_modules"];
+    let mut out = Snapshot::new();
+    let mut stack: Vec<std::path::PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(root)
+        .with_context(|| format!("reading {}", root.display()))?
+        .flatten()
+    {
+        if !NEVER_WATCH.contains(&entry.file_name().to_string_lossy().as_ref()) {
+            stack.push(entry.path());
+        }
+    }
+    while let Some(path) = stack.pop() {
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.is_dir() {
+            let Ok(entries) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for e in entries.flatten() {
+                if !NEVER_DEEP.contains(&e.file_name().to_string_lossy().as_ref()) {
+                    stack.push(e.path());
+                }
+            }
+        } else {
+            // A symlink to a file counts by its target, so an edit through it shows.
+            let meta = std::fs::metadata(&path).unwrap_or(meta);
+            if !meta.is_dir() {
+                out.insert(path, (meta.modified().ok(), meta.len()));
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn diff(before: &Snapshot, now: &Snapshot) -> Vec<(std::path::PathBuf, notify::EventKind)> {
+    use notify::EventKind;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind};
+    let mut out = Vec::new();
+    for (path, stamp) in now {
+        match before.get(path) {
+            None => out.push((path.clone(), EventKind::Create(CreateKind::File))),
+            Some(old) if old != stamp => {
+                out.push((path.clone(), EventKind::Modify(ModifyKind::Any)))
+            }
+            Some(_) => {}
+        }
+    }
+    for path in before.keys().filter(|p| !now.contains_key(*p)) {
+        out.push((path.clone(), EventKind::Remove(RemoveKind::File)));
+    }
+    out
+}
+
+/// Hands the workspace's top-level entries, less the never-watched ones, to the
+/// backend.
+fn register<T: notify::Watcher, C: FileIdCache>(
+    debouncer: &mut Debouncer<T, C>,
+    root: &Path,
+    warn_tx: &mpsc::UnboundedSender<String>,
+) -> Result<()> {
     let mut watched = 0usize;
     for entry in std::fs::read_dir(root)
         .with_context(|| format!("reading {}", root.display()))?
@@ -165,12 +325,7 @@ pub fn watch(root: &Path, debounce: Duration) -> Result<Watcher> {
     if watched == 0 {
         anyhow::bail!("nothing watchable under {}", root.display());
     }
-
-    Ok(Watcher {
-        _inner: Box::new(debouncer),
-        rx,
-        warnings: Some(warn_rx),
-    })
+    Ok(())
 }
 
 /// Immediate file children of `path`, if it is a directory.
@@ -375,6 +530,73 @@ mod tests {
         if let Ok(Some(batch)) = after {
             panic!("reading files was reported as a change: {batch:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod poll_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn polling_sees_a_nested_write_and_is_quiet_otherwise() {
+        // Cover for cairn 0094: where OS events never arrive, scanning is the
+        // only way to see an edit. Same callback as the native watcher, so a
+        // poll batch is filtered and relativized exactly as an event batch is.
+        let dir = std::env::temp_dir().join(format!("turborust-poll-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("crates/api/src")).unwrap();
+        std::fs::create_dir_all(dir.join("target/debug")).unwrap();
+        std::fs::write(dir.join("crates/api/src/main.rs"), "").unwrap();
+        let root = dir.canonicalize().unwrap();
+        let mut w = watch_with(
+            &root,
+            Duration::from_millis(50),
+            Backend::Poll(Duration::from_millis(100)),
+        )
+        .unwrap();
+
+        let quiet = tokio::time::timeout(Duration::from_millis(600), w.recv()).await;
+        assert!(quiet.is_err(), "an untouched tree was reported: {quiet:?}");
+
+        // Never-watched directories stay unwatched when polling, too.
+        std::fs::write(root.join("target/debug/out"), "x").unwrap();
+        std::fs::write(root.join("crates/api/src/main.rs"), "// edited\n").unwrap();
+        let batch = tokio::time::timeout(Duration::from_secs(5), w.recv())
+            .await
+            .expect("the poll never reported the edit")
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(batch.contains("crates/api/src/main.rs"), "saw {batch:?}");
+        assert!(
+            !batch.iter().any(|p| p.starts_with("target/")),
+            "polled a never-watched directory: {batch:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn polling_sees_a_second_save_within_the_same_second() {
+        // notify's own PollWatcher compares whole-second mtimes, so the second
+        // of two quick saves was lost for good. A same-length rewrite is the
+        // hardest case: only the sub-second mtime differs.
+        let dir = std::env::temp_dir().join(format!("turborust-poll2-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let root = dir.canonicalize().unwrap();
+        let mut w = watch_with(
+            &root,
+            Duration::from_millis(20),
+            Backend::Poll(Duration::from_millis(50)),
+        )
+        .unwrap();
+        for n in 1..=3 {
+            std::fs::write(root.join("src/a.rs"), format!("// save {n}\n")).unwrap();
+            let batch = tokio::time::timeout(Duration::from_secs(3), w.recv())
+                .await
+                .unwrap_or_else(|_| panic!("save {n} was never reported"))
+                .unwrap();
+            assert!(batch.contains("src/a.rs"), "save {n}: saw {batch:?}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
 
