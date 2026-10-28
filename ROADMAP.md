@@ -145,7 +145,7 @@ The cache is the load-bearing claim in this project. `why` explains it, the
 
 ## v1.4 — The loop keeps up
 
-`··········` 0% · 0 of 4 done · due 2027-11-01
+`##········` 20% · 1 of 5 done · due 2027-11-01
 
 The dev loop moved while this tool was being built.
 
@@ -158,6 +158,10 @@ The dev loop moved while this tool was being built.
 ### in progress
 
 - [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
+
+### done
+
+- [x] `0085` A stop request from outside kills turborust and orphans its children <sup>bug · p0</sup>
 
 ## later — Not now, not never
 
