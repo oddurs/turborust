@@ -1,0 +1,190 @@
+#!/usr/bin/env bash
+#
+# Finds tracker items whose status no longer matches the work.
+#
+# `cairn check` validates that items are well formed; it cannot know that the
+# work an item describes has landed. That gap is where the roadmap rots: an item
+# left in `doing` after its commit merged, a milestone still open after its last
+# item closed, a done item whose acceptance criteria were never ticked. Each of
+# these was found by hand once, which is the reason to stop finding them by hand.
+#
+# Reads the item files directly, so it runs where cairn cannot be installed.
+#
+# Severity follows established tools rather than taste, so it is predictable:
+#
+#   error   a contradiction no workflow intends. A closed milestone with open
+#           work in it — Jira will not release a version in that state.
+#   warn    probably drift, possibly right. A finished milestone left open
+#           (GitLab offers to close it, it does not insist); a done item with
+#           unticked criteria (cairn's own check warns, because refusing teaches
+#           people to write criteria they can tick rather than ones that are
+#           true); a stale claim (visible, never revoked, as in cairn).
+#   notice  this branch refs an item it leaves open. Fine if more PRs follow;
+#           otherwise close it here, as a closing keyword would on GitHub.
+#
+#   scripts/audit                report; exits non-zero on any error
+#   scripts/audit --strict       warnings fail too
+#   scripts/audit --branch BASE  also check the commits in BASE..HEAD
+#
+# Under GitHub Actions each finding is also an annotation on the item file.
+#
+set -euo pipefail
+
+strict=false
+branch_base=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --strict) strict=true ;;
+        --branch) branch_base="${2:?--branch needs a base ref}"; shift ;;
+        *) echo "usage: scripts/audit [--strict] [--branch BASE]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+[ -f cairn.toml ] && [ -d cairn/items ] || { echo "  no tracker here" >&2; exit 0; }
+
+# How long a claim may be held before it is called stale. Named and measured as
+# cairn's own `claim_stale_after` is — days since `claimed` — so the two agree
+# once the project is on a format that has that key. Read from cairn.toml when
+# present; this project's default otherwise.
+stale_days=$(sed -n 's/^claim_stale_after *= *\([0-9][0-9]*\).*/\1/p' cairn.toml | head -1)
+stale_days=${AUDIT_STALE_DAYS:-${stale_days:-30}}
+today=${AUDIT_TODAY:-$(date -u +%Y-%m-%d)}
+
+# Ids named by a `Refs:` trailer in a range of commits. Read from git rather
+# than the forge, so it works offline and in CI alike.
+refs_in() {
+    git log "$1" --format='%(trailers:key=Refs,valueonly)' 2>/dev/null \
+        | tr ', ' '\n\n' | sed -E 's/^0*//' | grep -E '^[0-9]+$' | sort -u | tr '\n' ' ' || true
+}
+
+default_branch=$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's@^origin/@@' || true)
+default_branch=${default_branch:-main}
+# CI checks out a detached merge ref, where only the remote-tracking branch exists.
+base=$default_branch
+git rev-parse --verify --quiet "refs/remotes/origin/$default_branch" >/dev/null \
+    && base="origin/$default_branch"
+landed=$(refs_in "$base")
+on_branch=""
+[ -n "$branch_base" ] && on_branch=$(refs_in "$branch_base..HEAD")
+
+# One awk pass over cairn.toml and every item. Status categories come from the
+# config rather than being hardcoded, since the statuses themselves are renameable.
+# The quote goes in as a variable: `\x27` in a regex is not portable to BSD awk.
+out=$(awk -v q="'" -v today="$today" -v stale="$stale_days" \
+          -v landed=" $landed " -v on_branch=" $on_branch " '
+    # Days since 1970-01-01 for a proleptic Gregorian date: Howard Hinnant'"'"'s
+    # days_from_civil, in integer arithmetic so it means the same in every awk.
+    function days(d,   a, y, m, era, yoe, doy, doe) {
+        if (split(d, a, "-") != 3) return -1
+        y = a[1] - (a[2] <= 2); m = a[2] + 0
+        era = int((y >= 0 ? y : y - 399) / 400)
+        yoe = y - era * 400
+        doy = int((153 * (m > 2 ? m - 3 : m + 9) + 2) / 5) + a[3] - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        return era * 146097 + doe - 719468
+    }
+    function report(level, msg) { printf "%s\t%s\t%s\t%s\n", level, file, label, msg }
+    function end_section() {
+        if (section != "" && !section_text) empty_sections = empty_sections (empty_sections ? ", " : "") "`" section "`"
+        section = ""; section_text = 0
+    }
+    function flush() {
+        if (file == "") return
+        end_section()
+        cat = category[status]
+        finished = (cat == "done" || cat == "dropped")
+        label = sprintf("%04d %s", id, title)
+        if (type == "milestone") {
+            mile_label[key] = label; mile_file[key] = file; mile_cat[key] = cat
+        } else if (milestone != "") {
+            sched[milestone]++
+            if (finished) sched_done[milestone]++
+        }
+        if (cat == "done" && unticked > 0)
+            report("warn", sprintf("done with %d of %d acceptance criteria unticked", unticked, unticked + ticked))
+        if (!finished && index(landed, " " id " "))
+            report("warn", "still " status ", but a commit on the default branch refs it")
+        if (!finished && index(on_branch, " " id " "))
+            report("notice", "this branch refs it and leaves it " status "; if the branch finishes it, close it here")
+        if (cat == "active" && claimed != "" && days(claimed) >= 0 && days(today) - days(claimed) >= stale)
+            report("warn", sprintf("claimed %s, %d days ago; still being worked on?", claimed, days(today) - days(claimed)))
+        if (!finished && type != "milestone" && empty_sections != "")
+            report("warn", "open with nothing under " empty_sections)
+    }
+    FILENAME ~ /cairn\.toml$/ {
+        # Only keys inside a [[status]] table count; any other header ends one.
+        if ($0 ~ /^\[/) { in_status = ($0 ~ /^\[\[status\]\]/); sname = "" }
+        if (!in_status) next
+        if ($0 ~ /^name *=/) { sname = $0; sub(/^name *= *"/, "", sname); sub(/".*/, "", sname) }
+        if ($0 ~ /^category *=/ && sname != "") {
+            c = $0; sub(/^category *= *"/, "", c); sub(/".*/, "", c); category[sname] = c
+        }
+        next
+    }
+    FNR == 1 {
+        flush()
+        file = FILENAME; fm = 0; id = 0
+        title = status = type = key = milestone = claimed = ""
+        unticked = ticked = 0; section = ""; section_text = 0; empty_sections = ""
+    }
+    /^---[ \t]*$/ && fm < 2 { fm++; next }
+    fm == 1 {
+        v = $0; sub(/^[a-z_]+: */, "", v); gsub("^[\"" q "]|[\"" q "]$", "", v)
+        if ($0 ~ /^id:/) id = v + 0
+        else if ($0 ~ /^title:/) title = v
+        else if ($0 ~ /^status:/) status = v
+        else if ($0 ~ /^type:/) type = v
+        else if ($0 ~ /^key:/) key = v
+        else if ($0 ~ /^milestone:/) milestone = v
+        else if ($0 ~ /^claimed:/) claimed = v
+        next
+    }
+    fm < 2 { next }
+    /^## / { end_section(); section = substr($0, 4); next }
+    # A bare "- [x]" or "- [ ]" with nothing after it is a placeholder, not content.
+    /^[ \t]*- \[[ xX]\][ \t]*$/ { next }
+    /[^ \t]/ { section_text = 1 }
+    /^[ \t]*- \[ \]/ { unticked++ }
+    /^[ \t]*- \[[xX]\]/ { ticked++ }
+    END {
+        flush()
+        for (k in mile_label) {
+            if (!sched[k]) continue
+            file = mile_file[k]; label = mile_label[k]
+            open_n = sched[k] - sched_done[k]
+            if (mile_cat[k] == "done" && open_n > 0)
+                report("error", sprintf("closed, but %d of its %d items are still open", open_n, sched[k]))
+            else if (mile_cat[k] != "done" && mile_cat[k] != "dropped" && open_n == 0)
+                report("warn", sprintf("all %d items are finished, but the milestone is open", sched[k]))
+        }
+    }
+' cairn.toml cairn/items/*.md | sort -t$'\t' -k1,1 -k3,3)
+
+count() { printf '%s\n' "$out" | grep -c "^$1"$'\t' || true; }
+errors=$(count error); warnings=$(count warn); notices=$(count notice)
+
+printf '%s\n' "$out" | while IFS=$'\t' read -r level file item msg; do
+    [ -n "$level" ] || continue
+    case "$level" in
+        error)  printf '  \033[31m✗\033[0m %s — %s\n' "$item" "$msg" ;;
+        warn)   printf '  \033[33m·\033[0m %s — %s\n' "$item" "$msg" ;;
+        notice) printf '  \033[2m· %s — %s\033[0m\n' "$item" "$msg" ;;
+    esac
+    # Workflow commands are how clippy, eslint and shellcheck actions put a
+    # finding on the file it is about; the same mechanism, for the same reason.
+    if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        gh_level=$level; [ "$level" = warn ] && gh_level=warning
+        printf '::%s file=%s,line=1,title=tracker %s::%s\n' "$gh_level" "$file" "${item%% *}" "$msg"
+    fi
+done
+
+if [ "$errors" -eq 0 ] && [ "$warnings" -eq 0 ] && [ "$notices" -eq 0 ]; then
+    printf '  \033[32m✓\033[0m tracker matches the work\n'
+fi
+
+[ "$errors" -gt 0 ] && exit 1
+$strict && [ "$warnings" -gt 0 ] && exit 1
+exit 0

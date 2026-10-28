@@ -85,13 +85,9 @@ Enough to dogfood in a real project.
 
 ## v1.1 — Someone else can use it
 
-`########··` 80% · 4 of 5 done · due 2027-05-01
+`##########` 100% · 5 of 5 done · due 2027-05-01
 
 The gaps that are not polish, but holes in what is already claimed.
-
-### in progress
-
-- [ ] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
 ### done
 
@@ -99,6 +95,7 @@ The gaps that are not polish, but holes in what is already claimed.
 - [x] `0042` Proxy: one origin for the whole stack <sup>feature · p0</sup>
 - [x] `0043` Nothing bounds how many builds run at once <sup>bug · p1</sup>
 - [x] `0060` up panics without a terminal instead of erroring <sup>bug · p1</sup>
+- [x] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
 ## v1.2 — Fit for CI
 
@@ -185,15 +182,13 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`########··` 75% · 3 of 4 done
-
-### backlog
-
-- [ ] `0064` a site for turborust, built by turborust <sup>feature · p2</sup>
+`##########` 100% · 5 of 5 done
 
 ### done
 
+- [x] `0064` a site for turborust, built by turborust <sup>feature · p2</sup>
 - [x] `0065` site: redraw illustrations, new type system, fix layout bugs <sup>bug · p2</sup>
 - [x] `0066` plan the next two milestones <sup>chore · p2</sup>
 - [x] `0083` a test that shells out to git can reach the wrong repository <sup>chore · p1</sup>
+- [x] `0084` The tracker drifts from the work, and nothing notices <sup>chore · p1</sup>
 
