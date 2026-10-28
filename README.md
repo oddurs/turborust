@@ -231,6 +231,19 @@ applies on the next restart. Their values reach strict tasks, since the file
 declared them, and they key the task: change one and the next run is a miss.
 The key records a hash of each value, never the value itself.
 
+A node that runs because of a change is told what changed: `TURBORUST_CHANGED`
+holds the workspace-relative paths that matched its own globs, one per line. It
+is empty on a start no change caused. Use it to test only what moved:
+
+```toml
+[tasks.test-changed]
+cmd = "cargo nextest run $(printf '%s\n' \"$TURBORUST_CHANGED\" | sed -n 's|^crates/\\([^/]*\\)/.*|-p \\1|p' | sort -u)"
+inputs = ["crates/**/*.rs"]
+```
+
+It is never part of a cache key, since it says why a task ran, not what it ran
+on.
+
 ### What `outputs` promises
 
 `outputs` is a claim that those files are everything the task produces that

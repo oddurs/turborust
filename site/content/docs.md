@@ -132,6 +132,9 @@ file is an error unless marked `required = false`.
 `timeout = "10m"` on a task, or `task_timeout` under `[project]`, stops a task
 that runs too long, process tree and all, and fails the run with exit code 124.
 
+A node restarted by a change gets `TURBORUST_CHANGED`: the paths that matched its
+globs, one per line. It never keys the cache.
+
 A hit **replays** the archived outputs rather than assuming the tree was
 untouched, and results are stored by key, so alternating between two branches
 hits both ways.
