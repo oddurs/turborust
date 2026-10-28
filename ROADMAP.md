@@ -193,7 +193,7 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`#####·····` 53% · 8 of 15 done
+`######····` 53% · 8 of 15 done
 
 ### backlog
 
