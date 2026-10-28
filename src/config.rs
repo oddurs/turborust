@@ -949,6 +949,8 @@ pub fn parse_size(s: &str) -> Result<Option<u64>> {
 }
 
 /// Parses `500ms`, `2s`, `1m`, or a bare number (seconds).
+const MAX_DURATION_MS: f64 = 365.0 * 24.0 * 3_600_000.0;
+
 pub fn parse_duration(s: &str) -> Result<Duration> {
     let s = s.trim();
     if s.is_empty() {
@@ -969,7 +971,17 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         "h" => n * 3_600_000.0,
         other => bail!("unknown duration unit `{other}` in `{s}` (use ms, s, m, h)"),
     };
-    Ok(Duration::from_millis(millis.max(0.0) as u64))
+    // Refused rather than clamped. `-5s` used to become zero and `inf` or a huge
+    // number saturated, and every deadline is `now + duration`: on platforms
+    // whose clock is a 64-bit nanosecond count that addition panics, mid-run
+    // (cairn 0086). Nothing here is meant to wait longer than a year.
+    if !millis.is_finite() || millis < 0.0 {
+        bail!("`{s}` is not a valid duration");
+    }
+    if millis > MAX_DURATION_MS {
+        bail!("`{s}` is longer than a year; a timeout that long is almost certainly a typo");
+    }
+    Ok(Duration::from_millis(millis as u64))
 }
 
 #[cfg(test)]
@@ -1124,6 +1136,27 @@ mod tests {
         assert_eq!(parse_duration("1m").unwrap(), Duration::from_secs(60));
         assert_eq!(parse_duration("3").unwrap(), Duration::from_secs(3));
         assert!(parse_duration("7x").is_err());
+    }
+
+    #[test]
+    fn durations_that_cannot_mean_what_they_say_are_refused() {
+        // Each of these used to be accepted: clamped to zero, or saturated into
+        // a deadline that overflows the clock on some platforms (cairn 0086).
+        for bad in [
+            "-5s",
+            "inf",
+            "infh",
+            "NaN",
+            "99999999999999999999h",
+            "8761h",
+        ] {
+            assert!(parse_duration(bad).is_err(), "`{bad}` should be refused");
+        }
+        assert_eq!(
+            parse_duration("8760h").unwrap(),
+            Duration::from_secs(8760 * 3600)
+        );
+        assert_eq!(parse_duration("0ms").unwrap(), Duration::ZERO);
     }
 
     fn ws(toml_src: &str) -> Result<Workspace> {
