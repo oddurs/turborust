@@ -47,3 +47,5 @@ access events by default for the same reason.
 Found while surveying adjacent tools for feature gaps, not by any test: checking whether the watcher reported an exhausted inotify limit (it does not — `0089`) produced a restart storm that turned out not to need the limit at all. Without the fix, the new supervisor test counts 26 restarts with nothing edited; with it, zero, then exactly one for one edit.
 
 Likely related: `one_edit_restarts_each_node_exactly_once` has failed intermittently on main and on every branch today (1 in 30 runs on main; first recorded on `0085`), with its task reading `cached` after the edit — a rerun that saw no change, which is what a spurious event produces. Not yet shown to be the same cause; recorded so the next look starts here.
+
+After the fix, 100 isolated runs of the supervisor suite: one failure, in `one_edit_restarts_each_node_exactly_once` again, but the other way round — the edit was never seen (no restart, nothing in the log), where before it was seen twice. So the spurious-event half is gone and what remains is a lost or unarmed event, a different bug. Filed as `0101` rather than folded in here.
