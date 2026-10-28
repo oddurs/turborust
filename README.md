@@ -242,6 +242,24 @@ The safe base is passed but not hashed: without `PATH` nothing runs, and hashing
 would miss whenever a shell rearranged itself. Swapping toolchains via `PATH` is
 covered by the global hash (`0017`), which folds in `rustc -V` directly.
 
+### Time limits
+
+```toml
+[project]
+task_timeout = "30m"   # every task, unless it says otherwise
+
+[tasks.test]
+cmd = "cargo test"
+timeout = "10m"
+```
+
+A task still running at its limit is stopped as a shutdown stops it: the whole
+process tree, `SIGTERM` first, then a kill after a grace period. It fails with
+"timed out after 10m", and `run` exits **124** (the code `timeout(1)` uses), so
+CI shows which task hung, not just a cancelled job. With `--continue` the rest
+of the graph still runs. Services have no time limit; liveness is what checks
+them.
+
 ### Build parallelism
 
 ```toml
