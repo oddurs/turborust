@@ -244,6 +244,41 @@ starts only once its dependency's health probe passes, and stops when that
 dependency goes down — which is what makes rebuild cascades work with exactly one
 restart per node.
 
+A probe that gives up leaves the node **unhealthy**: still running, not ready,
+and counted as a failure — so a one-shot `run` waiting on it ends instead of
+waiting forever.
+
+### Processes that reload themselves
+
+`dx serve`, `cargo leptos watch` and `trunk serve` watch your sources and rebuild
+on their own; `dx` even patches the running binary and keeps its state.
+Restarting them would throw that away. Telling turborust to leave them alone
+used to mean it stopped supervising them too — reading healthy through a failing
+rebuild, telling dependents nothing. `reload = "self"` keeps the supervision and
+drops the restart:
+
+```toml
+[services.web]
+cmd       = "dx serve"
+reload    = "self"                      # never restarted for a change
+health    = { log = "<ready line>" }    # ready, and ready again
+reloading = { log = "<rebuild line>" }  # a rebuild has started
+```
+
+Copy both strings from your tool's own output; they differ between tools and
+versions. Then a rebuild is a state change rather than a restart:
+
+- **`reloading`** matches → the node is `reloading`, out of ready. Dependents are
+  told exactly as for a restart, and the TUI and overlay show work in flight.
+- **`health`** matches again → `healthy`, and the cascade brings dependents back.
+  No browser reload is sent: the process just patched itself, and a reload would
+  discard what it kept.
+- **rustc reports an error** → `unhealthy` at once, with the error in the
+  overlay's Issues panel. A rebuild that goes quiet instead is `unhealthy` after
+  `ready_timeout`. Either way it comes good by itself on the next edit that builds.
+
+`turborust plan` marks these nodes, because their edges behave differently.
+
 ## The overlay
 
 Serving a frontend injects a dev overlay into it: a crab in the corner that stays
@@ -472,7 +507,9 @@ and wasm object files, walks symbol tables, and builds an address map that
 per-architecture and per-platform linking paths.
 
 So hot patching is a binary-patching problem, not an orchestration one. If you
-want it today, use dioxus. If turborust ever grows it, the realistic route is to
+want it today, use dioxus — and run it under turborust with
+[`reload = "self"`](#processes-that-reload-themselves), which supervises it
+without owning any of the patching. If turborust ever grows it, the realistic route is to
 integrate `subsecond` rather than to reimplement it — and that is a project in its
 own right, not a feature.
 

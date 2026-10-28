@@ -8,7 +8,8 @@
 
 use crate::cargo::Metadata;
 use crate::config::{
-    CachePolicy, EnvMode, Health, OnChange, ProxyRule, RestartPolicy, Serve, TargetDir, Workspace,
+    CachePolicy, EnvMode, Health, OnChange, ProxyRule, Reload, RestartPolicy, Serve, TargetDir,
+    Workspace,
 };
 use anyhow::{Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +44,9 @@ pub struct Node {
     pub on_change: OnChange,
     /// Parsed signal number for `on_change = "signal"`.
     pub signal: Option<i32>,
+    pub reload: Reload,
+    /// Output marking the start of a rebuild, for `reload = "self"`.
+    pub reloading: Option<String>,
     pub port: Option<u16>,
     pub health: Option<Health>,
     pub serve: Option<Serve>,
@@ -245,6 +249,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         if cmd.is_none() && s.serve.is_none() {
             bail!("service `{name}` has no command");
         }
+        check_reload(name, s)?;
 
         // A declared port with no explicit probe is a readiness signal in itself.
         let health = s
@@ -291,6 +296,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             restart: s.restart,
             on_change: s.on_change,
             signal: s.signal.as_deref().map(parse_signal).transpose()?,
+            reload: s.reload,
+            reloading: s.reloading.as_ref().map(|r| r.log.clone()),
             port: s.port,
             health,
             serve: s.serve.clone(),
@@ -357,6 +364,8 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         restart: RestartPolicy::Never,
         on_change: OnChange::Restart,
         signal: None,
+        reload: Reload::Restart,
+        reloading: None,
         port: None,
         health: None,
         serve: None,
@@ -388,6 +397,37 @@ fn parse_signal(name: &str) -> Result<i32> {
     })
 }
 
+/// Rejects reload settings that would be silently ignored.
+///
+/// Each of these used to be a way to write a config that looked supervised and
+/// was not, which is the failure `reload = "self"` exists to remove.
+fn check_reload(name: &str, s: &crate::config::Service) -> Result<()> {
+    if s.reload == Reload::Restart {
+        if s.reloading.is_some() {
+            bail!(
+                "service `{name}`: `reloading` only applies with `reload = \"self\"` — \
+                 a service turborust restarts is out of ready from the moment it stops"
+            );
+        }
+        return Ok(());
+    }
+    // `ignore` is accepted because it says the same thing; anything else asks
+    // turborust to act on a change it has been told is not its to act on.
+    if !matches!(s.on_change, OnChange::Restart | OnChange::Ignore) {
+        bail!(
+            "service `{name}`: `on_change` has no effect with `reload = \"self\"`, \
+             because the process rebuilds itself"
+        );
+    }
+    if s.reloading.is_some() && s.health.as_ref().and_then(|h| h.log.as_ref()).is_none() {
+        bail!(
+            "service `{name}`: `reloading` needs `health = {{ log = \"...\" }}`, \
+             which is how a reload is known to have finished"
+        );
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -400,6 +440,78 @@ mod tests {
             source: None,
         };
         resolve(&ws, &[]).unwrap()
+    }
+
+    fn plan_err(src: &str) -> String {
+        let ws = Workspace {
+            root: PathBuf::from("/w"),
+            config: toml::from_str::<Config>(src).unwrap(),
+            source: None,
+        };
+        match resolve(&ws, &[]) {
+            Ok(_) => panic!("expected the config to be rejected"),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    // Cover for cairn 0073: each of these used to be a config that looked
+    // supervised and was not.
+
+    #[test]
+    fn a_self_reloading_service_carries_its_probe_into_the_plan() {
+        let p = plan_from(
+            r#"
+            [services.web]
+            cmd = "dx serve"
+            reload = "self"
+            health = { log = "server running" }
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        let n = p.get("web").unwrap();
+        assert_eq!(n.reload, Reload::SelfManaged);
+        assert_eq!(n.reloading.as_deref(), Some("rebuilding"));
+    }
+
+    #[test]
+    fn reloading_without_reload_self_is_rejected() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            health = { log = "up" }
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        assert!(e.contains("only applies with `reload = \"self\"`"), "{e}");
+    }
+
+    #[test]
+    fn on_change_that_would_be_ignored_is_rejected() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            reload = "self"
+            on_change = "signal"
+            signal = "SIGHUP"
+        "#,
+        );
+        assert!(e.contains("`on_change` has no effect"), "{e}");
+    }
+
+    #[test]
+    fn reloading_needs_a_log_probe_to_know_when_it_finished() {
+        let e = plan_err(
+            r#"
+            [services.web]
+            cmd = "./web"
+            reload = "self"
+            port = 8080
+            reloading = { log = "rebuilding" }
+        "#,
+        );
+        assert!(e.contains("needs `health = { log"), "{e}");
     }
 
     #[test]
