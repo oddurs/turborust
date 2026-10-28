@@ -3,11 +3,11 @@ id: 67
 key: v1.3
 title: A cache you can audit
 type: milestone
-status: backlog
+status: done
 depends_on:
 - 40
 created: 2026-09-10
-updated: 2026-09-10
+updated: 2026-10-28
 due: 2027-09-01
 ---
 
@@ -29,3 +29,7 @@ Four properties, in that order:
 - **Provable.** A content-addressed cache is the only kind that can prove a
   build is non-deterministic. Nothing else in the ecosystem can say it as
   cheaply, and no one is saying it.
+
+## 2026-10-28
+
+Closed: all four properties shipped — precise (`0069`), bounded (`0070`), provable (`0071`), portable (`0072`). Verified at close-out with fmt, clippy and the full test suite (221 tests) green on main.

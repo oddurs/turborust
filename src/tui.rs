@@ -40,7 +40,16 @@ pub fn available() -> bool {
 /// a raw-mode failure, and the panic names ratatui's internals — from which a
 /// reader cannot tell whether turborust is broken, their config is wrong, or
 /// their environment simply has no tty.
-pub async fn run(engine: Arc<Engine>, wires: Arc<BTreeMap<String, Wire>>) -> Result<()> {
+/// The dashboard, until it is quit or `stop` resolves.
+///
+/// `Some` carries what `stop` resolved to; `None` means the dashboard was quit.
+/// Either way the terminal is restored here: a stop request that ended this by
+/// dropping it would otherwise leave the shell in raw mode on the alt screen.
+pub async fn run<T>(
+    engine: Arc<Engine>,
+    wires: Arc<BTreeMap<String, Wire>>,
+    stop: impl std::future::Future<Output = T>,
+) -> Result<Option<T>> {
     if !available() {
         anyhow::bail!(
             "`turborust up` needs a terminal for its dashboard.\n\
@@ -54,7 +63,10 @@ pub async fn run(engine: Arc<Engine>, wires: Arc<BTreeMap<String, Wire>>) -> Res
     // must not leave a half-entered alt screen behind.
     let mut terminal = ratatui::try_init()
         .context("could not put the terminal into raw mode for the dashboard")?;
-    let result = event_loop(&mut terminal, engine, wires).await;
+    let result = tokio::select! {
+        r = event_loop(&mut terminal, engine, wires) => r.map(|()| None),
+        stopped = stop => Ok(Some(stopped)),
+    };
     // Only restore what was actually entered — an unconditional restore writes
     // the leave-alt-screen escape into whatever is capturing stdout.
     let _ = ratatui::try_restore();
@@ -216,7 +228,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, st: &crate::state::AppState, engine: 
         let (glyph, color) = match &node.status {
             Status::Healthy => ("●", Color::Green),
             Status::Done { .. } => ("✓", Color::Green),
-            Status::Running | Status::Starting => ("◐", Color::Yellow),
+            Status::Running | Status::Starting | Status::Reloading => ("◐", Color::Yellow),
+            Status::Unhealthy => ("!", Color::Red),
             Status::Waiting(_) => ("○", Color::DarkGray),
             // Queued is amber, not grey: it is work about to happen, not work
             // stuck behind something else.

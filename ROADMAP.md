@@ -85,13 +85,9 @@ Enough to dogfood in a real project.
 
 ## v1.1 — Someone else can use it
 
-`########··` 80% · 4 of 5 done · due 2027-05-01
+`##########` 100% · 5 of 5 done · due 2027-05-01
 
 The gaps that are not polish, but holes in what is already claimed.
-
-### in progress
-
-- [ ] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
 ### done
 
@@ -99,6 +95,7 @@ The gaps that are not polish, but holes in what is already claimed.
 - [x] `0042` Proxy: one origin for the whole stack <sup>feature · p0</sup>
 - [x] `0043` Nothing bounds how many builds run at once <sup>bug · p1</sup>
 - [x] `0060` up panics without a terminal instead of erroring <sup>bug · p1</sup>
+- [x] `0063` A fresh clone gets none of the workflow <sup>bug · p1</sup>
 
 ## v1.2 — Fit for CI
 
@@ -148,16 +145,23 @@ The cache is the load-bearing claim in this project. `why` explains it, the
 
 ## v1.4 — The loop keeps up
 
-`··········` 0% · 0 of 4 done · due 2027-11-01
+`##········` 20% · 1 of 5 done · due 2027-11-01
 
 The dev loop moved while this tool was being built.
 
 ### backlog
 
-- [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
 - [ ] `0074` Test failures are invisible where every other failure is visible <sup>feature · p1</sup>
 - [ ] `0075` doctor advises but never measures <sup>feature · p1</sup>
 - [ ] `0078` Machine-readable output is not a stable contract <sup>chore · p2</sup>
+
+### in progress
+
+- [ ] `0073` A node that reloads itself is invisible to the supervision tree <sup>feature · p0</sup>
+
+### done
+
+- [x] `0085` A stop request from outside kills turborust and orphans its children <sup>bug · p0</sup>
 
 ## later — Not now, not never
 
@@ -185,15 +189,13 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`########··` 75% · 3 of 4 done
-
-### backlog
-
-- [ ] `0064` a site for turborust, built by turborust <sup>feature · p2</sup>
+`##########` 100% · 5 of 5 done
 
 ### done
 
+- [x] `0064` a site for turborust, built by turborust <sup>feature · p2</sup>
 - [x] `0065` site: redraw illustrations, new type system, fix layout bugs <sup>bug · p2</sup>
 - [x] `0066` plan the next two milestones <sup>chore · p2</sup>
 - [x] `0083` a test that shells out to git can reach the wrong repository <sup>chore · p1</sup>
+- [x] `0084` The tracker drifts from the work, and nothing notices <sup>chore · p1</sup>
 

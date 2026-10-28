@@ -2,12 +2,11 @@
 id: 63
 title: A fresh clone gets none of the workflow
 type: bug
-status: doing
+status: done
 milestone: v1.1
 assignee: Oddur Sigurdsson
-claimed: 2026-09-08
 created: 2026-09-08
-updated: 2026-09-08
+updated: 2026-10-28
 priority: p1
 effort: m
 area: project
@@ -44,3 +43,7 @@ and points at it rather than silently working without them.
 - [x] `scripts/agent` warns when the hooks are not installed
 - [x] A fresh clone is one documented command away from the full workflow
 - [x] The repository takes its own doctor advice where that advice is portable
+
+## 2026-10-28
+
+Closed after verifying on a genuinely fresh clone: `scripts/setup --check` reported both missing config entries and exited 1, `scripts/setup` then installed them, and `rust-toolchain.toml`, `.editorconfig` and `CONTRIBUTING.md` are all present. The work shipped in 80b363c; the item stayed in `doing` because that commit carried no `Refs` trailer, so nothing tied the merge back to it. This was the last open item in v1.1.

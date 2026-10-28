@@ -112,6 +112,17 @@ pub struct Service {
     pub on_change: OnChange,
     /// Signal sent when `on_change = "signal"`, e.g. "SIGHUP".
     pub signal: Option<String>,
+    /// Who rebuilds this service when its sources change: turborust, by
+    /// restarting it, or the process itself (`dx serve`, `cargo leptos watch`,
+    /// `trunk serve`).
+    #[serde(default)]
+    pub reload: Reload,
+    /// Output that means a self-reloading process has started rebuilding.
+    ///
+    /// Takes the node out of ready without restarting it, so dependents are told
+    /// and the build shows as in flight; it is ready again when `health.log`
+    /// next matches.
+    pub reloading: Option<Reloading>,
     /// Debounce window for watch events before acting.
     #[serde(default = "d_debounce")]
     pub debounce: String,
@@ -457,6 +468,32 @@ pub struct Health {
 
 fn d_health_interval() -> String {
     "300ms".into()
+}
+
+/// Who is responsible for rebuilding a service.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum Reload {
+    /// turborust restarts the service, as `on_change` says.
+    #[default]
+    Restart,
+    /// The process watches and rebuilds itself; turborust never restarts it for
+    /// a change, but still supervises it: readiness, the cascade, diagnostics.
+    #[serde(rename = "self")]
+    SelfManaged,
+}
+
+/// The reload-time counterpart of a readiness probe.
+///
+/// Only a log match, deliberately. A process that hot-patches itself keeps
+/// serving the old code while it rebuilds, so a port or HTTP probe passes
+/// throughout and cannot say a rebuild has started.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Reloading {
+    /// Substring the process prints when it starts a rebuild. Matched against
+    /// ANSI-stripped output.
+    pub log: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
