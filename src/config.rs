@@ -123,6 +123,10 @@ pub struct Service {
     /// and the build shows as in flight; it is ready again when `health.log`
     /// next matches.
     pub reloading: Option<Reloading>,
+    /// Keeps checking a running service, and takes it out of ready when it stops
+    /// answering. Readiness alone is checked until it first passes, and never
+    /// again — so a server that deadlocks reads healthy forever.
+    pub liveness: Option<Liveness>,
     /// Debounce window for watch events before acting.
     #[serde(default = "d_debounce")]
     pub debounce: String,
@@ -482,6 +486,37 @@ fn d_health_interval() -> String {
 
 pub fn d_probe_timeout() -> String {
     "5s".into()
+}
+
+/// A probe that keeps running after a service is ready.
+///
+/// Opt-in, because a probe nobody asked for is a restart nobody expected. Acts
+/// only after `failures` misses in a row, so one slow answer is not an outage —
+/// the threshold Docker's healthcheck and Kubernetes' liveness probes use.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct Liveness {
+    pub tcp: Option<u16>,
+    pub http: Option<String>,
+    /// A command that exits 0 while the service is alive.
+    pub cmd: Option<String>,
+    /// How long one attempt may take.
+    #[serde(default = "d_probe_timeout")]
+    pub timeout: String,
+    /// How often to check.
+    #[serde(default = "d_liveness_every")]
+    pub every: String,
+    /// Consecutive misses before the service counts as down.
+    #[serde(default = "d_liveness_failures")]
+    pub failures: u32,
+}
+
+fn d_liveness_every() -> String {
+    "10s".into()
+}
+
+fn d_liveness_failures() -> u32 {
+    3
 }
 
 /// Who is responsible for rebuilding a service.

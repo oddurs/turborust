@@ -47,6 +47,8 @@ pub struct Node {
     pub reload: Reload,
     /// Output marking the start of a rebuild, for `reload = "self"`.
     pub reloading: Option<String>,
+    /// Checked while running; see `config::Liveness`.
+    pub liveness: Option<Liveness>,
     pub port: Option<u16>,
     pub health: Option<Health>,
     pub serve: Option<Serve>,
@@ -68,6 +70,14 @@ impl Node {
             .map(|c| c.split_whitespace().any(|w| w == "cargo" || w == "trunk"))
             .unwrap_or(false)
     }
+}
+
+/// A resolved liveness probe: the same shape as readiness, checked on a timer.
+#[derive(Debug, Clone)]
+pub struct Liveness {
+    pub probe: Health,
+    pub every: Duration,
+    pub failures: u32,
 }
 
 pub struct Plan {
@@ -311,6 +321,33 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             signal: s.signal.as_deref().map(parse_signal).transpose()?,
             reload: s.reload,
             reloading: s.reloading.as_ref().map(|r| r.log.clone()),
+            liveness: s
+                .liveness
+                .as_ref()
+                .map(|l| -> Result<Liveness> {
+                    if l.tcp.is_none() && l.http.is_none() && l.cmd.is_none() {
+                        bail!("service `{name}`: `liveness` needs one of `tcp`, `http` or `cmd`");
+                    }
+                    if l.failures == 0 {
+                        bail!("service `{name}`: liveness.failures must be at least 1");
+                    }
+                    Ok(Liveness {
+                        probe: Health {
+                            tcp: l.tcp,
+                            http: l.http.clone(),
+                            log: None,
+                            cmd: l.cmd.clone(),
+                            timeout: l.timeout.clone(),
+                            interval: l.every.clone(),
+                        },
+                        every: {
+                            pd(&l.timeout)?;
+                            pd(&l.every)?
+                        },
+                        failures: l.failures,
+                    })
+                })
+                .transpose()?,
             port: s.port,
             health,
             serve: s.serve.clone(),
@@ -379,6 +416,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         signal: None,
         reload: Reload::Restart,
         reloading: None,
+        liveness: None,
         port: None,
         health: None,
         serve: None,
@@ -566,6 +604,16 @@ mod tests {
             ));
             assert!(e.contains(&format!("health.{key}")), "{e}");
         }
+    }
+
+    #[test]
+    fn a_liveness_probe_must_probe_something() {
+        // Cover for cairn 0092.
+        let e = plan_err("[services.api]\ncmd = \"x\"\nliveness = { every = \"1s\" }\n");
+        assert!(e.contains("needs one of `tcp`, `http` or `cmd`"), "{e}");
+        let e =
+            plan_err("[services.api]\ncmd = \"x\"\nliveness = { cmd = \"true\", failures = 0 }\n");
+        assert!(e.contains("at least 1"), "{e}");
     }
 
     // Cover for cairn 0073: each of these used to be a config that looked

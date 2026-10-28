@@ -287,6 +287,28 @@ A probe that gives up leaves the node **unhealthy**: still running, not ready,
 and counted as a failure — so a one-shot `run` waiting on it ends instead of
 waiting forever.
 
+### Staying alive
+
+Readiness is checked once, on the way up. A service that deadlocks or loses its
+database afterwards keeps its process and its green dot. `liveness` keeps
+asking:
+
+```toml
+[services.api]
+cmd      = "cargo run -p api"
+health   = { tcp = 8788 }
+liveness = { http = "http://127.0.0.1:8788/healthz", every = "10s", failures = 3 }
+```
+
+It takes the same `tcp`, `http` and `cmd` probes as `health`, with `timeout`
+per attempt (default `5s`), every `every` (default `10s`). One miss is not an
+outage: only `failures` in a row (default `3`) count. Then the service goes
+**unhealthy** and its dependents are told, as for any stop; when the probe
+answers again it is healthy again and they come back. With `restart = "always"`
+it is restarted instead, so a hang heals itself. Liveness pauses while a
+`reload = "self"` process is rebuilding, since it is not expected to answer
+then.
+
 ### Processes that reload themselves
 
 `dx serve`, `cargo leptos watch` and `trunk serve` watch your sources and rebuild

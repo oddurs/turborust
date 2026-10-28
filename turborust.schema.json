@@ -115,6 +115,52 @@
       },
       "additionalProperties": false
     },
+    "Liveness": {
+      "description": "A probe that keeps running after a service is ready.\n\nOpt-in, because a probe nobody asked for is a restart nobody expected. Acts\nonly after `failures` misses in a row, so one slow answer is not an outage —\nthe threshold Docker's healthcheck and Kubernetes' liveness probes use.",
+      "type": "object",
+      "properties": {
+        "cmd": {
+          "description": "A command that exits 0 while the service is alive.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "every": {
+          "description": "How often to check.",
+          "type": "string",
+          "default": "10s"
+        },
+        "failures": {
+          "description": "Consecutive misses before the service counts as down.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "http": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tcp": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "timeout": {
+          "description": "How long one attempt may take.",
+          "type": "string",
+          "default": "5s"
+        }
+      },
+      "additionalProperties": false
+    },
     "OnChange": {
       "description": "What a watched-file change does to a running service.",
       "oneOf": [
@@ -430,6 +476,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "liveness": {
+          "description": "Keeps checking a running service, and takes it out of ready when it stops\nanswering. Readiness alone is checked until it first passes, and never\nagain — so a server that deadlocks reads healthy forever.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Liveness"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "on_change": {
           "description": "What a watched-file change does to this service.",
