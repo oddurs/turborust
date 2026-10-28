@@ -218,6 +218,34 @@ async fn a_service_that_dies_fails_the_run_instead_of_hanging() {
     );
 }
 
+#[tokio::test]
+async fn a_service_that_never_becomes_ready_fails_the_run_instead_of_hanging() {
+    let sb = Sandbox::new("unready-svc");
+    // The live twin of the test above: `db` stays running and simply never
+    // announces. Found while working on 0073 — a probe that gave up left the
+    // node reading `starting` forever, so the guard above never saw a dead
+    // dependency and `run` blocked with no end.
+    let run = run(
+        &sb,
+        r#"
+        [services.db]
+        cmd = "echo booting; sleep 30"
+        restart = "never"
+        health = { log = "listening", interval = "30ms" }
+        ready_timeout = "500ms"
+
+        [tasks.waits]
+        depends_on = ["db"]
+        cmd = "true"
+        "#,
+        &["waits"],
+    );
+    let (code, _) = tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("a service that never became ready must end the run, not hang it");
+    assert_ne!(code, 0);
+}
+
 // ---------------------------------------------------------------- cache ----
 // Cover for cairn 0015: outputs must key the task, and a hit must reproduce the
 // result rather than assume the tree was not touched.

@@ -312,9 +312,9 @@ select:focus-visible {
 .svc:last-child { border-bottom: 0; }
 .svc .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tr-faint); }
 .svc .dot.healthy, .svc .dot.done { background: var(--tr-ok); }
-.svc .dot.running, .svc .dot.starting, .svc .dot.waiting { background: var(--tr-work); }
-.svc .dot.failed, .svc .dot.backoff { background: var(--tr-bad); }
-.svc .dot.running, .svc .dot.starting { animation: tr-pulse 1.4s ease-in-out infinite; }
+.svc .dot.running, .svc .dot.starting, .svc .dot.reloading, .svc .dot.waiting { background: var(--tr-work); }
+.svc .dot.failed, .svc .dot.backoff, .svc .dot.unhealthy { background: var(--tr-bad); }
+.svc .dot.running, .svc .dot.starting, .svc .dot.reloading { animation: tr-pulse 1.4s ease-in-out infinite; }
 @keyframes tr-pulse { 50% { opacity: 0.35; } }
 
 .svc .who { min-width: 0; }

@@ -26,6 +26,13 @@ pub enum Status {
     Starting,
     /// Probe passing (or no probe declared).
     Healthy,
+    /// A `reload = "self"` process announced a rebuild and has not finished it.
+    /// Still running — that is the difference from `Starting`, and why entering
+    /// this state clears nothing.
+    Reloading,
+    /// Running, but its readiness probe gave up — at startup, or after a reload
+    /// that did not finish. Docker's word for a container in the same state.
+    Unhealthy,
     /// A task that is currently executing.
     Running,
     /// A task that finished successfully.
@@ -48,6 +55,8 @@ impl Status {
             Status::Queued => "waiting: slot".into(),
             Status::Starting => "starting".into(),
             Status::Healthy => "healthy".into(),
+            Status::Reloading => "reloading".into(),
+            Status::Unhealthy => "unhealthy".into(),
             Status::Running => "running".into(),
             Status::Done { cached: true, .. } => "cached".into(),
             Status::Done {
@@ -69,6 +78,8 @@ impl Status {
             Status::Queued => "queued",
             Status::Starting => "starting",
             Status::Healthy => "healthy",
+            Status::Reloading => "reloading",
+            Status::Unhealthy => "unhealthy",
             Status::Running => "running",
             Status::Done { .. } => "done",
             Status::Failed(_) => "failed",
@@ -79,7 +90,10 @@ impl Status {
     }
 
     pub fn is_bad(&self) -> bool {
-        matches!(self, Status::Failed(_) | Status::Backoff(_))
+        matches!(
+            self,
+            Status::Failed(_) | Status::Backoff(_) | Status::Unhealthy
+        )
     }
 
     pub fn is_good(&self) -> bool {
@@ -118,6 +132,19 @@ pub struct NodeState {
     pub ready_pattern: Option<String>,
     /// Set once `ready_pattern` has been seen since the node last started.
     pub log_ready: bool,
+    /// Substring that marks the start of a self-managed rebuild.
+    pub reload_pattern: Option<String>,
+    /// Times `ready_pattern` has matched, ever.
+    ///
+    /// Counters rather than flags, for the reason `generation` is one: a reload
+    /// that starts and finishes between two polls must still be seen, and two
+    /// flags can only say that both happened, not in which order.
+    pub ready_matches: u64,
+    /// Times `reload_pattern` has matched, ever.
+    pub reload_matches: u64,
+    /// `ready_matches` as it stood at the latest reload, so "ready again" means
+    /// a match that came after it.
+    pub ready_matches_at_reload: u64,
     /// Bumped every time this node completes a run or becomes healthy.
     ///
     /// Dependents compare generations rather than trusting the order of control
@@ -141,6 +168,10 @@ impl Default for NodeState {
             diag: Parser::new(),
             ready_pattern: None,
             log_ready: false,
+            reload_pattern: None,
+            ready_matches: 0,
+            reload_matches: 0,
+            ready_matches_at_reload: 0,
             generation: 0,
         }
     }
@@ -356,12 +387,14 @@ impl AppState {
         } else if issues
             .iter()
             .any(|i| i.diagnostic.level == crate::diag::Level::Error)
-            || nodes.iter().any(|n| n.status == "failed")
+            || nodes
+                .iter()
+                .any(|n| matches!(n.status, "failed" | "unhealthy"))
         {
             "error"
         } else if nodes
             .iter()
-            .any(|n| matches!(n.status, "running" | "starting" | "waiting"))
+            .any(|n| matches!(n.status, "running" | "starting" | "reloading" | "waiting"))
         {
             "building"
         } else {
@@ -402,6 +435,12 @@ impl AppState {
     pub fn set_ready_pattern(&mut self, name: &str, pattern: Option<String>) {
         if let Some(n) = self.nodes.get_mut(name) {
             n.ready_pattern = pattern;
+        }
+    }
+
+    pub fn set_reload_pattern(&mut self, name: &str, pattern: Option<String>) {
+        if let Some(n) = self.nodes.get_mut(name) {
+            n.reload_pattern = pattern;
         }
     }
 

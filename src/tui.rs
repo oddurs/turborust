@@ -216,7 +216,8 @@ fn draw_sidebar(f: &mut Frame, area: Rect, st: &crate::state::AppState, engine: 
         let (glyph, color) = match &node.status {
             Status::Healthy => ("●", Color::Green),
             Status::Done { .. } => ("✓", Color::Green),
-            Status::Running | Status::Starting => ("◐", Color::Yellow),
+            Status::Running | Status::Starting | Status::Reloading => ("◐", Color::Yellow),
+            Status::Unhealthy => ("!", Color::Red),
             Status::Waiting(_) => ("○", Color::DarkGray),
             // Queued is amber, not grey: it is work about to happen, not work
             // stuck behind something else.
