@@ -39,6 +39,18 @@ depends on `shared`. Hand-written globs are how the shared-crate problem happens
 you list `crates/api/**`, forget `crates/shared/**`, and spend ten minutes
 debugging a phantom.
 
+## Install
+
+```
+cargo install --locked --git https://github.com/oddurs/turborust
+```
+
+Needs Rust 1.89 or newer. Each tagged release also carries prebuilt binaries for
+macOS, Linux (static, any distro) and Windows, with `SHA256SUMS`, a
+build-provenance attestation, shell completions and a man page — see
+[SECURITY.md](SECURITY.md#verifying-a-release) for checking them. From the first
+release on, `cargo install turborust` works as well.
+
 ## Commands
 
 ```
@@ -200,6 +212,11 @@ row in a database — can under-invalidate its dependents, in the same way it ca
 already be restored incompletely from cache. If a task has effects it cannot
 declare, give it `cache = "disabled"` and it will neither be replayed nor be
 treated as stable by anything downstream.
+
+Outputs must stay inside the workspace: an absolute path or one that climbs out
+with `..` is refused when the config is loaded. A hit writes those files back, so
+an output outside the workspace would let a cache entry write wherever the path
+pointed.
 
 The safe base is passed but not hashed: without `PATH` nothing runs, and hashing it
 would miss whenever a shell rearranged itself. Swapping toolchains via `PATH` is
