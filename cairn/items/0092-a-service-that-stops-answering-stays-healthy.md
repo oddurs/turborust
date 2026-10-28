@@ -55,11 +55,11 @@ next answer brings it back. With it, the node is restarted with the reason
 took away itself (`took_down`), so a failed self-reload stays failed until the
 process says otherwise.
 
-Two things found on the way. A fresh `sleep(every)` per loop iteration, the
-obvious first version, starved under a `reload = "self"` node: every log line
-re-entered the select and restarted the sleep, so a chatty process was never
-checked. The interval fixes it; `liveness_still_runs_beside_a_self_reload_poll`
-fails without it. Liveness also pauses while such a node is `reloading`, since
+Why an interval and not a `sleep(every)` in the select: the running loop wakes
+for every other branch too, and a fresh sleep would restart each time, so a
+node whose loop is kept busy (a `reload = "self"` node polling its output) would
+never be checked. `liveness_still_runs_beside_a_self_reload_poll` fails with the
+sleep version. Liveness also pauses while such a node is `reloading`, since
 a rebuild is not an outage.
 
 Mutation-checked: never enabled fails 4 tests; acting on the first miss fails
