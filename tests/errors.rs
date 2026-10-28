@@ -44,3 +44,43 @@ fn run_says_why_a_task_could_not_start() {
         "the reason should be printed, got:\n{said}"
     );
 }
+
+#[test]
+fn init_imports_a_procfile_and_names_what_it_skipped() {
+    // Cover for cairn 0097: a line init cannot translate is said out loud, not
+    // left for the user to notice missing once `up` is running.
+    let dir = std::env::temp_dir().join(format!("turborust-init-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("Procfile"),
+        "web: ./serve -p $PORT\nrelease: ./migrate\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_turborust"));
+    cmd.arg("init").current_dir(&dir);
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output().expect("turborust runs");
+    let written = std::fs::read_to_string(dir.join("turborust.toml")).unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("imported 1 process(es) from Procfile"),
+        "{said}"
+    );
+    assert!(
+        said.contains("skipped Procfile line 2: `release`"),
+        "{said}"
+    );
+    assert!(written.contains("[services.web]"), "{written}");
+}
