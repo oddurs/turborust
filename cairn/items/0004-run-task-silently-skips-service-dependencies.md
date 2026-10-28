@@ -6,7 +6,7 @@ status: done
 milestone: v0.0
 assignee: Oddur Sigurdsson
 created: 2026-09-08
-updated: 2026-09-08
+updated: 2026-10-28
 priority: p0
 effort: s
 area: engine
@@ -33,10 +33,10 @@ tasks, then stop the services in reverse order. That is the supervision tree the
 
 ## Acceptance criteria
 
-- [ ] A task depending on a service gets that service running before it starts
-- [ ] Services started by `run` are stopped again before the process exits
-- [ ] A test covers task-depends-on-service in the `run` path
-- [ ] `let _ = targets;` is gone
+- [x] A task depending on a service gets that service running before it starts
+- [x] Services started by `run` are stopped again before the process exits
+- [x] A test covers task-depends-on-service in the `run` path
+- [x] `let _ = targets;` is gone
 
 ## 2026-09-08
 
@@ -51,3 +51,7 @@ Two things surfaced while fixing it:
 `--force` moved onto the Engine (AtomicBool) because task execution is driven by supervisors, which have no argument to thread through.
 
 Verified the tests fail against the old code: 'task ran without its service dependency' and 'a dead dependency must fail the run' both trip. 10 consecutive green runs after.
+
+## 2026-10-28
+
+Acceptance criteria ticked during the milestone close-out; each was already met when the item closed. `tests/run_path.rs::a_task_depending_on_a_service_gets_that_service_running` covers the first three (the service starts, the task sees it, and the service is `Stopped` afterwards), and `let _ = targets;` no longer appears anywhere in `src`. The boxes were simply never updated, which made a done item read as unverified.
