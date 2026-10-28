@@ -84,21 +84,27 @@ the thing that gets forgotten.
 ## Closing the item
 
 Close the item in the branch that finishes it — `cairn close <id>`, then commit —
-so merging the PR closes the item too. A step that comes after the merge belongs
-to nobody. `scripts/agent pr` warns when the referenced item is still open.
+so merging the PR closes the item too, the way a closing keyword does on GitHub.
+A step that comes after the merge belongs to nobody. `scripts/agent pr` warns
+when the referenced item is still open, and so does CI on the pull request.
 
 `scripts/audit` catches what slips through. It reads the item files directly, so
-it needs no cairn, and it runs in `agent check` and in CI:
+it needs no cairn, and it runs in `agent check` and in CI, where each finding is
+an annotation on the item file.
 
-| Finding | Level |
-|---|---|
-| a milestone is open, but every item scheduled in it is finished | error |
-| an item is done, but has unticked acceptance criteria | error |
-| an item is open, but a commit on the default branch carries its `Refs:` | warning |
-| an item has been active for over 30 days with no update | warning |
+| Finding | Level | Precedent |
+|---|---|---|
+| a closed milestone still has open items | error | Jira will not release a version with unresolved issues |
+| every item in a milestone is finished, but it is open | warning | GitLab offers to close the milestone; it does not insist |
+| a done item has unticked acceptance criteria | warning | `cairn check` warns, so criteria stay true rather than tickable |
+| an open item is referenced by a `Refs:` on the default branch | warning | work can span several PRs |
+| a claim is held `claim_stale_after` days (default 30) | warning | cairn: stale means visible, never revoked |
+| an open item has an empty section | warning | issue forms with required fields |
+| this branch refs an item and leaves it open (`--branch`) | notice | changeset-bot: a nudge on the PR, never a gate |
 
-Warnings are not errors because both can be right: work can span several PRs,
-and some work is slow. `scripts/audit --strict` fails on them too.
+Only errors fail. A warning in CI is in front of the author on the PR without
+blocking someone else's unrelated change on it; `scripts/audit --strict` makes
+warnings fail too, for anyone who wants that locally.
 
 ## What the hooks enforce
 
