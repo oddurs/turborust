@@ -38,6 +38,44 @@ jobs:
       - run: cargo clippy --all-targets -- -D warnings
       - run: cargo fmt --check
 
+  # The declared rust-version is a promise; this keeps it.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - id: msrv
+        run: echo "version=$(sed -n 's/^rust-version *= *"\(.*\)"/\1/p' Cargo.toml)" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+      - uses: Swatinem/rust-cache@v2
+      # `+version` explicitly: rust-toolchain.toml pins `stable`, and a pinned
+      # toolchain file outranks the one the action installs, so a bare
+      # `cargo build` here would quietly check the wrong compiler.
+      - run: cargo +${{ steps.msrv.outputs.version }} build --locked
+
+  supply-chain:
+    # Advisories, licences and sources, against deny.toml. Every machine this
+    # runs on builds its users' code; it should not carry a known vulnerability
+    # quietly, or take on a copyleft licence without somebody deciding to.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  packaging:
+    # What `cargo publish` makes of this, checked on every change rather than
+    # discovered at release time: a file the include list leaves out that the
+    # build needs is invisible to `cargo build` and fatal to `cargo install`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo publish --dry-run --locked
+
   hygiene:
     name: commit hygiene
     runs-on: ubuntu-latest

@@ -39,6 +39,18 @@ depends on `shared`. Hand-written globs are how the shared-crate problem happens
 you list `crates/api/**`, forget `crates/shared/**`, and spend ten minutes
 debugging a phantom.
 
+## Install
+
+```
+cargo install --locked --git https://github.com/oddurs/turborust
+```
+
+Needs Rust 1.89 or newer. Each tagged release also carries prebuilt binaries for
+macOS, Linux (static, any distro) and Windows, with `SHA256SUMS`, a
+build-provenance attestation, shell completions and a man page — see
+[SECURITY.md](SECURITY.md#verifying-a-release) for checking them. From the first
+release on, `cargo install turborust` works as well.
+
 ## Commands
 
 ```

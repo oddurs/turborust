@@ -18,12 +18,16 @@ description: "Install turborust, write a config, and understand what it does."
 ## Install
 
 ```
-cargo install turborust
+cargo install --locked --git https://github.com/oddurs/turborust
 cd your-workspace
 turborust init          # infers a starting config from your cargo workspace
 turborust plan          # see what it resolved to
 turborust up            # start it
 ```
+
+Each tagged release also carries prebuilt binaries for macOS, Linux (static) and
+Windows, with checksums, build provenance, shell completions and a man page; from
+the first release on, `cargo install turborust` works too. Rust 1.89 or newer.
 
 `init` writes a config with a `#:schema` line, so an editor completes and
 validates the file with no per-editor setup.
