@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use turborust::cache::Cache;
 use turborust::config::Workspace;
+use turborust::contract::{DifferingOutput, Output, VerifyReport, VerifyTask};
 use turborust::engine::{self, Engine};
 use turborust::plan::{self, Kind};
 use turborust::{cargo, doctor, serve, state, tui, watch};
@@ -23,6 +24,11 @@ struct Cli {
     /// Colour output: auto, always, never. `NO_COLOR` is honoured.
     #[arg(long, default_value = "auto", global = true)]
     color: String,
+    /// How a failure is reported on stderr: text, or json with a stable
+    /// `code` (see `turborust schema --json error`). Also
+    /// `TURBORUST_ERROR_FORMAT`.
+    #[arg(long, value_enum, global = true)]
+    error_format: Option<ErrorFormat>,
     #[command(subcommand)]
     command: Option<Cmd>,
 }
@@ -137,20 +143,55 @@ enum Cmd {
     },
     /// Print the man page, in roff.
     Man,
-    /// Print a JSON Schema for turborust.toml, for editor completion.
-    Schema,
+    /// Print a JSON Schema for turborust.toml, for editor completion, or with
+    /// `--json` for one of the JSON payloads turborust prints and serves.
+    Schema {
+        /// Which payload: the schema of what that output promises.
+        #[arg(long, value_enum, value_name = "OUTPUT")]
+        json: Option<Output>,
+    },
 }
 
-fn main() -> Result<()> {
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+enum ErrorFormat {
+    Text,
+    Json,
+}
+
+fn main() {
     let cli = Cli::parse();
-    let rt = tokio::runtime::Builder::new_multi_thread()
+    let format = cli.error_format.unwrap_or_else(|| {
+        match std::env::var("TURBORUST_ERROR_FORMAT").as_deref() {
+            Ok("json") => ErrorFormat::Json,
+            _ => ErrorFormat::Text,
+        }
+    });
+    let result = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .build()?;
-    let code = rt.block_on(dispatch(cli))?;
-    // Drop the runtime before exiting so pty reader threads are not killed
-    // mid-write, which would truncate the last lines of output.
-    drop(rt);
-    std::process::exit(code);
+        .build()
+        .map_err(anyhow::Error::from)
+        .and_then(|rt| {
+            let code = rt.block_on(dispatch(cli));
+            // Drop the runtime before exiting so pty reader threads are not
+            // killed mid-write, which would truncate the last lines of output.
+            drop(rt);
+            code
+        });
+    match result {
+        Ok(code) => std::process::exit(code),
+        Err(err) => {
+            match format {
+                // What returning the error from `main` printed.
+                ErrorFormat::Text => eprintln!("Error: {err:?}"),
+                ErrorFormat::Json => eprintln!(
+                    "{}",
+                    serde_json::to_string(&turborust::contract::error_report(&err))
+                        .unwrap_or_default()
+                ),
+            }
+            std::process::exit(1);
+        }
+    }
 }
 
 async fn dispatch(cli: Cli) -> Result<i32> {
@@ -178,9 +219,13 @@ async fn dispatch(cli: Cli) -> Result<i32> {
             clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
             Ok(0)
         }
-        Cmd::Schema => {
+        Cmd::Schema { json: None } => {
             let schema = schemars::schema_for!(turborust::config::Config);
             println!("{}", serde_json::to_string_pretty(&schema)?);
+            Ok(0)
+        }
+        Cmd::Schema { json: Some(output) } => {
+            println!("{}", serde_json::to_string_pretty(&output.schema())?);
             Ok(0)
         }
         Cmd::Man => {
@@ -435,18 +480,16 @@ fn cmd_cache(config: Option<&std::path::Path>, json: bool) -> Result<i32> {
     let last = cache.last_sweep();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schemaVersion": 1,
-                "bytes": stats.bytes,
-                "records": stats.records,
-                "budgetBytes": budget,
-                "byTask": stats.by_task,
-                "sharedBytes": cache.shared_bytes(),
-                "lastSweep": last,
-            }))?
-        );
+        let report = turborust::contract::CacheReport {
+            schema_version: Output::Cache.version(),
+            bytes: stats.bytes,
+            records: stats.records,
+            budget_bytes: budget,
+            by_task: stats.by_task,
+            shared_bytes: cache.shared_bytes(),
+            last_sweep: last,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok(0);
     }
 
@@ -734,6 +777,7 @@ async fn cmd_run(
             (st.snapshot().issues, st.history.tallies().clone())
         };
         let summary = turborust::summary::RunSummary {
+            schema_version: turborust::summary::SCHEMA,
             schema: turborust::summary::SCHEMA,
             started_at: started,
             duration_ms: began.elapsed().as_millis() as u64,
@@ -1175,79 +1219,81 @@ async fn cmd_verify(
         for (rel, a) in first {
             match second.get(rel) {
                 Some(b) if b == a => {}
-                Some(b) => differing.push(serde_json::json!({
-                    "path": rel,
-                    "first": a,
-                    "second": b,
-                    "divergence": turborust::cache::first_difference(
-                        &first_dir.join(rel), &second_dir.join(rel)),
-                })),
-                None => differing.push(serde_json::json!({
-                    "path": rel, "first": a, "second": null, "divergence": null,
-                })),
+                Some(b) => differing.push(DifferingOutput {
+                    path: rel.clone(),
+                    first: Some(a.clone()),
+                    second: Some(b.clone()),
+                    divergence: turborust::cache::first_difference(
+                        &first_dir.join(rel),
+                        &second_dir.join(rel),
+                    ),
+                }),
+                None => differing.push(DifferingOutput {
+                    path: rel.clone(),
+                    first: Some(a.clone()),
+                    second: None,
+                    divergence: None,
+                }),
             }
         }
-        for rel in second.keys() {
+        for (rel, b) in second {
             if !first.contains_key(rel) {
-                differing.push(serde_json::json!({
-                    "path": rel, "first": null, "second": second[rel], "divergence": null,
-                }));
+                differing.push(DifferingOutput {
+                    path: rel.clone(),
+                    first: None,
+                    second: Some(b.clone()),
+                    divergence: None,
+                });
             }
         }
         let _ = std::fs::remove_dir_all(ws.cache_dir().join("verify").join(safe_name(name)));
-        reports.push(serde_json::json!({
-            "task": name,
-            "deterministic": differing.is_empty(),
-            "outputs": first.len(),
-            "differing": differing,
-        }));
+        reports.push(VerifyTask {
+            task: name.clone(),
+            deterministic: differing.is_empty(),
+            outputs: first.len(),
+            differing,
+        });
     }
 
-    let bad = reports
-        .iter()
-        .filter(|r| r["deterministic"] == serde_json::json!(false))
-        .count();
+    let bad = reports.iter().filter(|r| !r.deterministic).count();
 
     if json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "schemaVersion": 1,
-                "deterministic": bad == 0,
-                "tasks": reports,
-            }))?
-        );
+        let report = VerifyReport {
+            schema_version: Output::Verify.version(),
+            deterministic: bad == 0,
+            tasks: reports,
+        };
+        println!("{}", serde_json::to_string_pretty(&report)?);
         return Ok((bad > 0) as i32);
     }
 
     println!();
     for r in &reports {
-        let task = r["task"].as_str().unwrap_or_default();
-        if r["deterministic"] == serde_json::json!(true) {
+        let task = &r.task;
+        if r.deterministic {
             println!(
                 "  \u{1b}[32m✓\u{1b}[0m \u{1b}[1m{task}\u{1b}[0m \u{1b}[2m— deterministic ({} output(s), 2 runs identical)\u{1b}[0m",
-                r["outputs"]
+                r.outputs
             );
             continue;
         }
         println!(
             "  \u{1b}[31m✗\u{1b}[0m \u{1b}[1m{task}\u{1b}[0m \u{1b}[31mNOT DETERMINISTIC\u{1b}[0m"
         );
-        for d in r["differing"].as_array().into_iter().flatten() {
-            let short = |v: &serde_json::Value| {
-                v.as_str()
+        for d in &r.differing {
+            let short = |v: &Option<String>| {
+                v.as_deref()
                     .map(|h| format!("b3:{}", &h[..8.min(h.len())]))
                     .unwrap_or_else(|| "absent".into())
             };
             println!(
                 "      ~ {}  {} -> {}",
-                d["path"].as_str().unwrap_or_default(),
-                short(&d["first"]),
-                short(&d["second"])
+                d.path,
+                short(&d.first),
+                short(&d.second)
             );
-            if let Some(v) = d["divergence"].as_object() {
-                let g = |k: &str| v.get(k).and_then(|x| x.as_u64()).unwrap_or(0);
-                let (offset, run, la, lb) = (g("offset"), g("run"), g("left_len"), g("right_len"));
+            if let Some(v) = &d.divergence {
+                let (offset, run, la, lb) = (v.offset, v.run, v.left_len, v.right_len);
                 let hint = if la != lb {
                     "different lengths — output is not just a stamped field"
                 } else if run <= 16 {

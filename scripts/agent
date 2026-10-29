@@ -172,6 +172,14 @@ cmd_check() {
         die "tests are failing"
     fi
     printf '%s\n' "$out" | grep -E '^test result:' | sed 's/^/    /'
+    dim "  output schemas"
+    local base=origin/main
+    git rev-parse --verify -q "$base" >/dev/null || base=HEAD
+    if ! out=$("$repo_root/scripts/schemas" --against "$base" 2>&1); then
+        printf '%s\n' "$out" | sed 's/^/    /'
+        die "the JSON output contract has drifted"
+    fi
+    printf '%s\n' "$out" | sed 's/^/    /'
     if has_cairn; then dim "  roadmap"; cairn check | sed 's/^/    /'; fi
     # Needs no cairn, so it runs even where the roadmap check above cannot.
     dim "  tracker"

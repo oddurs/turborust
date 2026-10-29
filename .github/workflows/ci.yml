@@ -101,12 +101,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The output schemas are compared with the base branch's.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       # Committed because editors fetch it by URL, so it has to exist — but
       # generated, so it must not be allowed to drift from the types.
       - run: cargo run --quiet -- schema > turborust.schema.json
       - run: git diff --exit-code turborust.schema.json
+      # The JSON output contract (cairn 0078): in sync with the types, and not
+      # broken since the base without a schemaVersion bump.
+      - run: scripts/schemas --against ${{ github.event.pull_request.base.sha || 'HEAD~1' }}
 
   roadmap:
     name: roadmap validates

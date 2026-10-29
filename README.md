@@ -65,13 +65,21 @@ turborust doctor            what is costing you seconds on every rebuild
 turborust plan              the resolved graph, with derived globs
 turborust connect <node>    attach this terminal to a running process
 turborust init              scaffold a config from your Cargo workspace and Procfile
-turborust schema            JSON Schema for turborust.toml, for editor completion
+turborust schema            JSON Schema for turborust.toml (--json <output>: for its JSON)
 turborust completions <sh>  shell completion script
 turborust man               the man page
 turborust verify [task…]    run tasks twice and prove their outputs match
 turborust cache             what the cache is holding, and what it last dropped
 turborust clean             drop cached task results
 ```
+
+### Scripting against it
+
+`run --dry-run=json`, `run --summarize`, `verify --json`, `cache --json` and the
+overlay's endpoints print JSON with a schema and a `schemaVersion`, and
+`--error-format json` makes a failure one JSON value on stderr with a stable
+`code`. `turborust schema --json <output>` prints each schema. What may change
+without a new version is in [docs/json.md](docs/json.md).
 
 ### Stopping
 

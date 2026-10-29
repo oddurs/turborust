@@ -1,0 +1,67 @@
+{
+  "$defs": {
+    "TaskPrediction": {
+      "properties": {
+        "cached": {
+          "description": "True if this task would be served from cache.",
+          "type": "boolean"
+        },
+        "changed": {
+          "description": "Why it would miss. Empty when it would hit, or when it is uncacheable.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "command": {
+          "type": "string"
+        },
+        "key": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        },
+        "uncacheable": {
+          "description": "Set when the task declares no inputs and so is never cached.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "task",
+        "command",
+        "cached",
+        "key",
+        "changed",
+        "uncacheable"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "schema": {
+      "description": "The version under its first name. Deprecated: read `schemaVersion`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/TaskPrediction"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "schema",
+    "tasks"
+  ],
+  "title": "turborust dry-run output",
+  "type": "object"
+}

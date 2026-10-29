@@ -13,7 +13,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
 
-#[derive(Debug, Clone, Serialize, Default)]
+#[derive(Debug, Clone, Serialize, Default, schemars::JsonSchema)]
 pub struct GlobalHash {
     /// `rustc -V`, which covers the case strict env mode deliberately leaves
     /// open: swapping toolchains through `PATH` without changing any file.

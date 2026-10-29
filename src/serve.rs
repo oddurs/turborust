@@ -173,11 +173,6 @@ pub async fn serve(opts: ServeOpts) -> Result<()> {
     Ok(())
 }
 
-/// Streams a full state snapshot whenever anything changes.
-///
-/// Polling the shared state and de-duplicating the serialized frame is simpler
-/// and more robust than threading a change-notification channel through every
-/// supervisor — and at 250ms an idle page sends nothing at all.
 /// The session's history, newest last (cairn 0110). Read-only, like the state
 /// stream beside it.
 async fn history(
@@ -193,9 +188,18 @@ async fn history(
         let app = st.app.lock().unwrap();
         app.history.recent(q.get("node").map(String::as_str), limit)
     };
-    axum::Json(entries).into_response()
+    axum::Json(crate::contract::HistoryReport {
+        schema_version: crate::contract::Output::History.version(),
+        history: entries,
+    })
+    .into_response()
 }
 
+/// Streams a full state snapshot whenever anything changes.
+///
+/// Polling the shared state and de-duplicating the serialized frame is simpler
+/// and more robust than threading a change-notification channel through every
+/// supervisor — and at 250ms an idle page sends nothing at all.
 async fn state_stream(State(st): State<Arc<ServeState>>) -> impl IntoResponse {
     let app = st.app.clone();
     let mut last = String::new();

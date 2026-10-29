@@ -4,6 +4,7 @@
 //! Keeping them in the same dependency space is the point — a service can wait on
 //! a task (build before serve) and a task can wait on a service (migrate after db).
 
+use crate::contract::{Code, Failure};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -790,10 +791,20 @@ impl Workspace {
             Some(p) => p.to_path_buf(),
             None => find_config()?,
         };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            let code = if e.kind() == std::io::ErrorKind::NotFound {
+                Code::ConfigNotFound
+            } else {
+                Code::ConfigInvalid
+            };
+            Failure::coded(
+                code,
+                anyhow::Error::from(e).context(format!("reading {}", path.display())),
+            )
+        })?;
+        let config: Config = toml::from_str(&text)
+            .with_context(|| format!("parsing {}", path.display()))
+            .map_err(|e| Failure::coded(Code::ConfigInvalid, e))?;
         let root = path
             .parent()
             .map(|p| p.to_path_buf())
@@ -805,7 +816,8 @@ impl Workspace {
             config,
             source: Some(text),
         };
-        ws.validate()?;
+        ws.validate()
+            .map_err(|e| Failure::coded(Code::ConfigInvalid, e))?;
         Ok(ws)
     }
 
@@ -1002,7 +1014,12 @@ fn find_config() -> Result<PathBuf> {
             }
         }
         if !dir.pop() {
-            bail!("no turborust.toml found in this directory or any parent (try `turborust init`)");
+            return Err(Failure::coded(
+                Code::ConfigNotFound,
+                anyhow::anyhow!(
+                    "no turborust.toml found in this directory or any parent (try `turborust init`)"
+                ),
+            ));
         }
     }
 }

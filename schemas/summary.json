@@ -1,0 +1,215 @@
+{
+  "$defs": {
+    "GlobalHash": {
+      "properties": {
+        "config": {
+          "description": "Content hash of the resolved turborust config.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "lockfile": {
+          "description": "Content hash of the lockfile, if the workspace has one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "toolchain": {
+          "description": "`rustc -V`, which covers the case strict env mode deliberately leaves\nopen: swapping toolchains through `PATH` without changing any file.",
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "IssueSnapshot": {
+      "properties": {
+        "code": {
+          "description": "`E0425`, when rustc supplies one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame": {
+          "description": "The code frame, verbatim and ANSI-free, for display under the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "level": {
+          "$ref": "#/$defs/Level"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "level",
+        "message",
+        "frame"
+      ],
+      "type": "object"
+    },
+    "Level": {
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "Tally": {
+      "description": "What a node has been through, counted as it happened \u2014 so it survives the\nhistory being summarised (cairn 0110).",
+      "properties": {
+        "failures": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "restarts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "restarts",
+        "failures"
+      ],
+      "type": "object"
+    },
+    "TaskOutcomeRecord": {
+      "properties": {
+        "cached": {
+          "type": "boolean"
+        },
+        "changed": {
+          "description": "Inputs that differed from the previous run, when this was a miss.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "exit_code": {
+          "format": "int32",
+          "type": "integer"
+        },
+        "key": {
+          "type": "string"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "cached",
+        "duration_ms",
+        "key",
+        "exit_code",
+        "changed"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "duration_ms": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "exit_code": {
+      "format": "int32",
+      "type": "integer"
+    },
+    "global": {
+      "$ref": "#/$defs/GlobalHash"
+    },
+    "issues": {
+      "description": "Every diagnostic the run's output held at the end \u2014 compile errors,\nwarnings and failing tests \u2014 with the node it came from. Additive, so\nthe schema version stands.",
+      "items": {
+        "$ref": "#/$defs/IssueSnapshot"
+      },
+      "type": "array"
+    },
+    "nodes": {
+      "additionalProperties": {
+        "$ref": "#/$defs/Tally"
+      },
+      "description": "Restarts and failures per node, counted from the run's history.",
+      "type": "object"
+    },
+    "schema": {
+      "description": "The version under its first name. Deprecated: read `schemaVersion`.",
+      "format": "uint32",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "started_at": {
+      "description": "Seconds since the epoch. Not a formatted date: a consumer can format it,\nand a formatted one cannot be sorted reliably.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/TaskOutcomeRecord"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "schema",
+    "started_at",
+    "duration_ms",
+    "exit_code",
+    "global",
+    "tasks",
+    "issues",
+    "nodes"
+  ],
+  "title": "turborust summary output",
+  "type": "object"
+}

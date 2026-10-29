@@ -587,7 +587,8 @@ pub async fn connect(cache_dir: &Path, node: &str) -> Result<i32> {
     let path = socket_path(cache_dir);
     let mut stream = transport::connect(&path)
         .await
-        .with_context(|| format!("no turborust running here (looked for {})", path.display()))?;
+        .with_context(|| format!("no turborust running here (looked for {})", path.display()))
+        .map_err(|e| crate::contract::Failure::coded(crate::contract::Code::NotRunning, e))?;
 
     write_line(
         &mut stream,

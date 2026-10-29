@@ -184,6 +184,7 @@ mod tests {
     #[test]
     fn a_prediction_colours_the_nodes() {
         let prediction = Prediction {
+            schema_version: crate::summary::SCHEMA,
             schema: crate::summary::SCHEMA,
             tasks: vec![crate::summary::TaskPrediction {
                 task: "check".into(),
