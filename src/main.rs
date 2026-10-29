@@ -727,6 +727,12 @@ async fn cmd_run(
     .await?;
 
     if output.summarize {
+        // One guard: two `lock()`s in this literal would both live to the end
+        // of the statement, and the second would wait on the first forever.
+        let (issues, nodes) = {
+            let st = engine.state.lock().unwrap();
+            (st.snapshot().issues, st.history.tallies().clone())
+        };
         let summary = turborust::summary::RunSummary {
             schema: turborust::summary::SCHEMA,
             started_at: started,
@@ -734,8 +740,8 @@ async fn cmd_run(
             exit_code: code,
             global: plan.global.settled(),
             tasks: engine.outcomes(),
-            issues: engine.state.lock().unwrap().snapshot().issues,
-            nodes: engine.state.lock().unwrap().history.tallies().clone(),
+            issues,
+            nodes,
         };
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());

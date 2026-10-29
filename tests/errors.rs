@@ -84,3 +84,57 @@ fn init_imports_a_procfile_and_names_what_it_skipped() {
     );
     assert!(written.contains("[services.web]"), "{written}");
 }
+
+#[test]
+fn run_summarize_writes_its_record_and_exits() {
+    // `--summarize` once took the state lock twice in one statement and hung
+    // after every run, with nothing left running; nothing exercised it.
+    let dir = std::env::temp_dir().join(format!("turborust-summary-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("turborust.toml"),
+        "[tasks.test]\ncmd = \"echo \\\"thread 'tests::adds' panicked at src/lib.rs:9:5:\\\"; echo nope; echo; exit 101\"\n",
+    )
+    .unwrap();
+
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_turborust"));
+    cmd.args(["run", "test", "--summarize"])
+        .current_dir(&dir)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        cmd.env_remove(var);
+    }
+    let mut child = cmd.spawn().expect("turborust runs");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            break None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let record = std::fs::read_dir(dir.join(".turborust/summaries"))
+        .ok()
+        .and_then(|mut d| d.next())
+        .and_then(|e| std::fs::read_to_string(e.ok()?.path()).ok())
+        .unwrap_or_default();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let status = status.expect("`run --summarize` should exit, not hang");
+    assert_eq!(status.code(), Some(101));
+    let json: serde_json::Value = serde_json::from_str(&record).expect("a JSON record");
+    let issue = &json["issues"][0];
+    assert_eq!(issue["code"], "panic", "{record}");
+    assert_eq!(issue["file"], "src/lib.rs", "{record}");
+    assert_eq!(json["nodes"]["test"]["failures"], 1, "{record}");
+}

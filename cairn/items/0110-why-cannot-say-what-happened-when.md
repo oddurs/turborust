@@ -40,3 +40,5 @@ them; a test checks the count past a cap of 5.
 
 Not done: the overlay does not render the history yet. The endpoint is what it
 would read; drawing it is the overlay's own work.
+
+A bug in this change, found before it shipped while checking 0074 against real nextest: `run --summarize` hung after every run, with nothing left running. The summary's struct literal took `engine.state.lock()` once for `issues` and again for `nodes`; both guards live until the end of the statement, so the second waited on the first forever. Nothing exercised `--summarize` from the binary, so the suite stayed green. Now one guard, and `run_summarize_writes_its_record_and_exits` (tests/errors.rs) runs the real binary with a deadline and checks the record's issues and tallies; restoring the double lock makes it time out.
