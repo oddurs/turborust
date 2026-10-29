@@ -935,6 +935,19 @@ impl Engine {
         self.set(name, Status::Failed(code));
     }
 
+    /// Waits until every line of output so far has been read and handled —
+    /// at most `within`, since a grandchild that keeps a pty open would
+    /// otherwise hold this forever.
+    pub async fn drain_output(&self, within: Duration) {
+        let began = tokio::time::Instant::now();
+        crate::proc::output_read(within).await;
+        let done = Arc::new(tokio::sync::Notify::new());
+        if self.events_tx.send(ProcEvent::Flush(done.clone())).is_ok() {
+            let left = within.saturating_sub(began.elapsed());
+            let _ = tokio::time::timeout(left, done.notified()).await;
+        }
+    }
+
     fn log(&self, proc: &str, text: String) {
         let _ = self.events_tx.send(ProcEvent::Line(crate::proc::LogLine {
             seq: crate::proc::next_seq(),
@@ -1509,6 +1522,12 @@ pub async fn pump_events_with(
                     if let Some(r) = reporter.as_mut() {
                         r.finish(&proc, true);
                     }
+                }
+                ProcEvent::Flush(done) => {
+                    if let Some(r) = reporter.as_mut() {
+                        r.sync();
+                    }
+                    done.notify_one();
                 }
             }
         }

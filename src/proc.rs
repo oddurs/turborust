@@ -54,6 +54,43 @@ pub enum ProcEvent {
         proc: String,
         error: String,
     },
+    /// Not an event: whoever drains the queue notifies this on reaching it,
+    /// so a sender knows everything sent before it has been handled.
+    Flush(Arc<tokio::sync::Notify>),
+}
+
+/// Children whose exit has not been reported yet. Reported means after the
+/// last of its output: the report follows the reader's end of file.
+static UNREPORTED: AtomicU64 = AtomicU64::new(0);
+
+/// Waits, at most `within`, until every child that has exited has had its
+/// output and its exit reported. The queue may still hold them; see
+/// [`ProcEvent::Flush`].
+pub async fn output_read(within: Duration) {
+    let deadline = tokio::time::Instant::now() + within;
+    while UNREPORTED.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
+/// How long an exit report waits for the rest of the output. A grandchild
+/// that keeps the pty open would otherwise hold it for as long as it runs.
+const OUTPUT_GRACE: Duration = Duration::from_millis(100);
+
+/// Counts a child until its exit has been reported.
+struct OpenReader;
+
+impl OpenReader {
+    fn new() -> Self {
+        UNREPORTED.fetch_add(1, Ordering::AcqRel);
+        OpenReader
+    }
+}
+
+impl Drop for OpenReader {
+    fn drop(&mut self) {
+        UNREPORTED.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// A running child plus the handles needed to stop it deterministically.
@@ -92,6 +129,9 @@ pub struct Handle {
     /// every 20ms was most of an idle `up`'s CPU, and its exits were seen up
     /// to 20ms late.
     exit: watch::Receiver<Option<i32>>,
+    /// Set once turborust has signalled the child itself, so its death by that
+    /// signal is not reported as news.
+    stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Handle {
@@ -105,6 +145,7 @@ impl Handle {
     /// Unix does this with process groups; Windows has no equivalent signal, so
     /// the tree is a job object and the escalation is a single terminate.
     pub async fn stop(&self, grace: Duration) -> Result<()> {
+        self.stopped.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
@@ -157,6 +198,7 @@ impl Handle {
     /// second stop request: by then nobody is willing to wait out a grace
     /// period, and anything left alive would be an orphan.
     pub fn kill_now(&self) {
+        self.stopped.store(true, Ordering::Release);
         #[cfg(unix)]
         if let Some(pid) = self.pid {
             unsafe {
@@ -326,9 +368,16 @@ pub fn spawn_with(
     let scroll_tx = scrollback.clone();
     let pname = name.to_string();
     let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<()>(0);
+    // Closed when the reader is done: the exit report waits for it, so a
+    // child's exit never overtakes the end of its output. Grouped output is
+    // printed at the exit, and lost whatever arrived after it.
+    let (eof_async, mut eof_async_rx) = watch::channel(());
+    let (eof_sync, eof_sync_rx) = std::sync::mpsc::channel::<()>();
+    let unreported = OpenReader::new();
     std::thread::Builder::new()
         .name(format!("pty-{name}"))
         .spawn(move || {
+            let _done = (eof_async, eof_sync);
             // A zero-capacity send blocks until the parent receives, so returning
             // from `recv` below means this thread is on the next instruction.
             let _ = ready_tx.send(());
@@ -379,23 +428,46 @@ pub fn spawn_with(
         {
             let mut c = waiter.lock().unwrap();
             if let Ok(Some(status)) = c.try_wait() {
-                break status.exit_code() as i32;
+                break (
+                    status.exit_code() as i32,
+                    status.signal().map(str::to_string),
+                );
             }
         }
         std::thread::sleep(Duration::from_millis(20));
     };
-    let finish = move |code: i32| {
-        let _ = exit_tx.send(Some(code));
+    // The supervisor hears at once; the report waits for the output.
+    let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let we_stopped = stopped.clone();
+    let line_name: Arc<str> = name.into();
+    let report = move |(code, signal): (i32, Option<String>)| {
+        // A signal turborust did not send is the one thing an exit code of 1
+        // cannot tell apart from a failure, so it is said.
+        if let Some(signal) = signal
+            && !we_stopped.load(Ordering::Acquire)
+        {
+            let _ = tx.send(ProcEvent::Line(LogLine {
+                seq: next_seq(),
+                proc: line_name,
+                text: format!("\u{1b}[2m[turborust]\u{1b}[0m killed by a signal: {signal}"),
+                transient: false,
+            }));
+        }
         let _ = tx.send(ProcEvent::Exited { proc: pname, code });
+        drop(unreported);
     };
     match exit_notifier(pid) {
         // Linux: the kernel says when it has exited, and no thread waits for it.
         // A thread per child was half of turborust's threads, and every thread
         // makes the next fork slower.
         Some(exited) => {
+            drop(eof_sync_rx);
             tokio::spawn(async move {
                 exited.await;
-                finish(reap());
+                let status = reap();
+                let _ = exit_tx.send(Some(status.0));
+                let _ = tokio::time::timeout(OUTPUT_GRACE, eof_async_rx.changed()).await;
+                report(status);
             });
         }
         None => {
@@ -409,7 +481,10 @@ pub fn spawn_with(
                     if let Some(pid) = pid {
                         wait_without_reaping(pid);
                     }
-                    finish(reap());
+                    let status = reap();
+                    let _ = exit_tx.send(Some(status.0));
+                    let _ = eof_sync_rx.recv_timeout(OUTPUT_GRACE);
+                    report(status);
                 })
                 .context("spawning wait thread")?;
         }
@@ -426,6 +501,7 @@ pub fn spawn_with(
         raw,
         scrollback,
         exit,
+        stopped,
     })
 }
 
@@ -1150,6 +1226,73 @@ mod tests {
         .expect("posix_spawn path");
         drop(pair.slave);
         assert_eq!(child.wait().unwrap().exit_code(), 7);
+    }
+
+    /// A child's exit is reported after the last of its output, never before:
+    /// grouped output is printed at the exit, and lost whatever came after.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exit_is_reported_after_all_of_the_output() {
+        for _ in 0..5 {
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            let _h = spawn("t", "seq 1 20000", Path::new("."), &Default::default(), tx).unwrap();
+            let mut lines = 0;
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                    Ok(Some(ProcEvent::Line(_))) => lines += 1,
+                    Ok(Some(ProcEvent::Exited { .. })) => break,
+                    Ok(Some(_)) => {}
+                    other => panic!("no exit reported: {other:?}"),
+                }
+            }
+            assert_eq!(lines, 20000, "the exit overtook the output");
+        }
+    }
+
+    /// A death by a signal turborust did not send is said, since its exit
+    /// code alone reads as an ordinary failure; one turborust sent is not.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_signal_from_outside_is_reported_and_our_own_stop_is_not() {
+        async fn lines_until_exit(rx: &mut mpsc::UnboundedReceiver<ProcEvent>) -> Vec<String> {
+            let mut out = Vec::new();
+            loop {
+                match tokio::time::timeout(Duration::from_secs(10), rx.recv()).await {
+                    Ok(Some(ProcEvent::Line(l))) => out.push(strip_ansi(&l.text).into_owned()),
+                    Ok(Some(ProcEvent::Exited { .. })) => return out,
+                    Ok(Some(_)) => {}
+                    other => panic!("no exit: {other:?}"),
+                }
+            }
+        }
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = spawn(
+            "t",
+            "exec sleep 30",
+            Path::new("."),
+            &Default::default(),
+            tx,
+        )
+        .unwrap();
+        unsafe { libc::kill(h.pid.unwrap() as libc::pid_t, libc::SIGKILL) };
+        let lines = lines_until_exit(&mut rx).await;
+        assert!(
+            lines.iter().any(|l| l.contains("killed by a signal")),
+            "{lines:?}"
+        );
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = spawn(
+            "t",
+            "exec sleep 30",
+            Path::new("."),
+            &Default::default(),
+            tx,
+        )
+        .unwrap();
+        h.stop(Duration::from_secs(2)).await.unwrap();
+        let lines = lines_until_exit(&mut rx).await;
+        assert!(!lines.iter().any(|l| l.contains("killed")), "{lines:?}");
     }
 
     /// What `connect` relies on: ctrl-c typed into the pty reaches the child as
