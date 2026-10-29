@@ -11,13 +11,13 @@
 
 use anyhow::{Context, Result};
 use notify::RecursiveMode;
-use notify_debouncer_full::{
-    DebounceEventResult, DebouncedEvent, Debouncer, FileIdCache, new_debouncer,
-};
 use std::collections::BTreeSet;
 use std::path::Path;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+
+/// What a quiet spell delivers: everything that happened during it.
+type Batch = std::result::Result<Vec<notify::Event>, Vec<notify::Error>>;
 
 /// A live filesystem watch.
 ///
@@ -108,7 +108,7 @@ pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<W
     let root_owned = root.to_path_buf();
     let runtime_warn = warn_tx.clone();
 
-    let handler = move |res: DebounceEventResult| {
+    let handler = move |res: Batch| {
         // Errors are not worth tearing the dev loop down for, but the one that
         // means part of the tree is no longer watched has to be said out loud.
         let events = match res {
@@ -122,16 +122,6 @@ pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<W
         };
         let mut paths: BTreeSet<String> = BTreeSet::new();
         for ev in events {
-            // Reading is not changing. inotify reports a file or directory being
-            // opened, and `expand_dir` below reads every directory it is handed —
-            // so on Linux each access event produced the next, and a nested
-            // workspace restarted its services about eight times a second,
-            // forever (cairn 0088). A write always produces a modify event too,
-            // so nothing real is lost; watchexec ignores access events by
-            // default for the same reason.
-            if matches!(ev.kind, notify::EventKind::Access(_)) {
-                continue;
-            }
             for p in &ev.paths {
                 if let Some(rel) = relativize(&root_owned, p) {
                     paths.insert(rel);
@@ -152,10 +142,20 @@ pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<W
 
     let inner: Box<dyn std::any::Any + Send> = match backend {
         Backend::Native => {
-            let mut d =
-                new_debouncer(debounce, None, handler).context("creating filesystem watcher")?;
-            register(&mut d, root, &warn_tx)?;
-            Box::new(d)
+            let (events_tx, events_rx) = std::sync::mpsc::channel();
+            let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+                if !is_access(&ev) {
+                    let _ = events_tx.send(ev);
+                }
+            })
+            .context("creating filesystem watcher")?;
+            register(&mut w, root, &warn_tx)?;
+            // Ends by itself when `w` is dropped: that drops the sender above.
+            std::thread::Builder::new()
+                .name("turborust debounce".into())
+                .spawn(move || debounce_loop(events_rx, debounce, handler))
+                .context("starting the debounce thread")?;
+            Box::new(w)
         }
         Backend::Poll(every) => Box::new(Poller::start(root, every, handler)?),
     };
@@ -165,6 +165,66 @@ pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<W
         rx,
         warnings: Some(warn_rx),
     })
+}
+
+/// Reading is not changing. inotify reports a file or directory being opened,
+/// and `expand_dir` reads every directory it is handed — so on Linux each
+/// access event produced the next, and a nested workspace restarted its
+/// services about eight times a second, forever (cairn 0088). A write always
+/// produces a modify event too, so nothing real is lost; watchexec ignores
+/// access events by default for the same reason. Dropped before debouncing,
+/// so a read cannot even hold a quiet spell open.
+fn is_access(ev: &notify::Result<notify::Event>) -> bool {
+    matches!(ev, Ok(e) if matches!(e.kind, notify::EventKind::Access(_)))
+}
+
+/// The longest a steady stream of changes can hold a batch back, unless the
+/// quiet window asked for is itself long.
+const LONGEST_BATCH: Duration = Duration::from_secs(1);
+
+/// Groups events into batches that end after `quiet` with nothing new.
+///
+/// Waits on the channel rather than on a clock: notify's own debouncer woke
+/// every quarter of its window forever, which was most of an idle `up`'s
+/// wakeups, and added up to that quarter again to every edit.
+fn debounce_loop(
+    rx: std::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    quiet: Duration,
+    mut handler: impl FnMut(Batch),
+) {
+    use std::sync::mpsc::RecvTimeoutError;
+    while let Ok(first) = rx.recv() {
+        let mut events = Vec::new();
+        let mut errors = Vec::new();
+        let mut take = |ev: notify::Result<notify::Event>| match ev {
+            Ok(e) => events.push(e),
+            Err(e) => errors.push(e),
+        };
+        take(first);
+        let began = Instant::now();
+        let longest = LONGEST_BATCH.max(quiet * 4);
+        let mut open = true;
+        while open {
+            let left = longest.saturating_sub(began.elapsed());
+            if left.is_zero() {
+                break;
+            }
+            match rx.recv_timeout(quiet.min(left)) {
+                Ok(ev) => take(ev),
+                Err(RecvTimeoutError::Timeout) => break,
+                Err(RecvTimeoutError::Disconnected) => open = false,
+            }
+        }
+        if !errors.is_empty() {
+            handler(Err(errors));
+        }
+        if !events.is_empty() {
+            handler(Ok(events));
+        }
+        if !open {
+            return;
+        }
+    }
 }
 
 /// A scan of the tree every interval, for where OS events never arrive.
@@ -187,7 +247,7 @@ type Snapshot =
 impl Poller {
     fn start<F>(root: &Path, every: Duration, mut handler: F) -> Result<Poller>
     where
-        F: FnMut(DebounceEventResult) + Send + 'static,
+        F: FnMut(Batch) + Send + 'static,
     {
         use std::sync::atomic::{AtomicBool, Ordering};
         let root = root.to_path_buf();
@@ -205,12 +265,9 @@ impl Poller {
                     if changed.is_empty() || stopped.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let at = std::time::Instant::now();
                     let events = changed
                         .into_iter()
-                        .map(|(path, kind)| {
-                            DebouncedEvent::new(notify::Event::new(kind).add_path(path), at)
-                        })
+                        .map(|(path, kind)| notify::Event::new(kind).add_path(path))
                         .collect();
                     handler(Ok(events));
                 }
@@ -288,8 +345,8 @@ fn diff(before: &Snapshot, now: &Snapshot) -> Vec<(std::path::PathBuf, notify::E
 
 /// Hands the workspace's top-level entries, less the never-watched ones, to the
 /// backend.
-fn register<T: notify::Watcher, C: FileIdCache>(
-    debouncer: &mut Debouncer<T, C>,
+fn register(
+    watcher: &mut impl notify::Watcher,
     root: &Path,
     warn_tx: &mpsc::UnboundedSender<String>,
 ) -> Result<()> {
@@ -308,7 +365,7 @@ fn register<T: notify::Watcher, C: FileIdCache>(
         } else {
             RecursiveMode::NonRecursive
         };
-        match debouncer.watch(&path, mode) {
+        match watcher.watch(&path, mode) {
             Ok(()) => watched += 1,
             Err(e) => {
                 // Notify registers what it can before giving up, so the rest of
@@ -663,6 +720,71 @@ mod guard_lifetime_tests {
 #[cfg(test)]
 mod dir_expansion_tests {
     use super::*;
+
+    fn ev(path: &str) -> notify::Result<notify::Event> {
+        Ok(notify::Event::new(notify::EventKind::Any).add_path(path.into()))
+    }
+
+    /// Runs the loop over events sent at the given offsets, then hangs up.
+    fn batches(quiet_ms: u64, sends: &[(u64, &'static str)]) -> Vec<Vec<String>> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let out = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = out.clone();
+        let t = std::thread::spawn(move || {
+            debounce_loop(rx, Duration::from_millis(quiet_ms), move |b: Batch| {
+                let paths = b
+                    .unwrap()
+                    .iter()
+                    .flat_map(|e| e.paths.iter().map(|p| p.display().to_string()))
+                    .collect();
+                seen.lock().unwrap().push(paths);
+            })
+        });
+        let start = Instant::now();
+        for (at, path) in sends {
+            let due = start + Duration::from_millis(*at);
+            std::thread::sleep(due.saturating_duration_since(Instant::now()));
+            tx.send(ev(path)).unwrap();
+        }
+        drop(tx);
+        t.join().unwrap();
+        std::sync::Arc::try_unwrap(out)
+            .unwrap()
+            .into_inner()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_burst_of_events_is_one_batch() {
+        let got = batches(80, &[(0, "a"), (10, "b"), (20, "a"), (30, "c")]);
+        assert_eq!(got, vec![vec!["a", "b", "a", "c"]]);
+    }
+
+    #[test]
+    fn events_a_quiet_spell_apart_are_two_batches() {
+        let got = batches(40, &[(0, "a"), (300, "b")]);
+        assert_eq!(got, vec![vec!["a"], vec!["b"]]);
+    }
+
+    #[test]
+    fn a_steady_stream_is_still_delivered() {
+        // An event every 20ms never leaves 40ms of quiet; without the cap the
+        // first batch would wait for the stream to stop.
+        let sends: Vec<(u64, &'static str)> = (0..90).map(|i| (i * 20, "x")).collect();
+        let got = batches(40, &sends);
+        assert!(
+            got.len() >= 2,
+            "flushed while the stream ran: {} batches",
+            got.len()
+        );
+        assert_eq!(got.iter().map(Vec::len).sum::<usize>(), 90, "nothing lost");
+    }
+
+    #[test]
+    fn hanging_up_delivers_what_is_pending() {
+        let got = batches(10_000, &[(0, "a"), (5, "b")]);
+        assert_eq!(got, vec![vec!["a", "b"]]);
+    }
 
     #[test]
     fn directory_events_expand_to_their_files() {

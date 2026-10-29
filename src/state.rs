@@ -8,6 +8,7 @@ use crate::diag::{Diagnostic, Parser};
 use crate::proc::LogLine;
 use serde::Serialize;
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -388,34 +389,60 @@ impl NodeState {
 pub struct LogStore {
     lines: VecDeque<LogLine>,
     cap: usize,
-    last_was_transient: BTreeMap<String, bool>,
+    /// Text held, in bytes, against `byte_cap`.
+    bytes: usize,
+    byte_cap: usize,
+    last_was_transient: BTreeMap<Arc<str>, bool>,
 }
+
+/// Output text kept in memory, whatever the line count. A count alone bounded
+/// nothing: twenty thousand lines of a minified bundle is over a gigabyte.
+const LOG_BYTES: usize = 16 * 1024 * 1024;
 
 impl LogStore {
     pub fn new(cap: usize) -> Self {
+        Self::with_byte_cap(cap, LOG_BYTES)
+    }
+
+    pub fn with_byte_cap(cap: usize, byte_cap: usize) -> Self {
         LogStore {
             lines: VecDeque::with_capacity(cap.min(4096)),
             cap,
+            bytes: 0,
+            byte_cap,
             last_was_transient: BTreeMap::new(),
         }
     }
 
     pub fn push(&mut self, line: LogLine) {
-        let replace = self
-            .last_was_transient
-            .get(&line.proc)
-            .copied()
-            .unwrap_or(false);
-        self.last_was_transient
-            .insert(line.proc.clone(), line.transient);
+        // Looked up before inserting: a key is allocated once per process, not
+        // once per line.
+        let replace = match self.last_was_transient.get_mut(&*line.proc) {
+            Some(last) => std::mem::replace(last, line.transient),
+            None => {
+                self.last_was_transient
+                    .insert(line.proc.clone(), line.transient);
+                false
+            }
+        };
         if replace && let Some(idx) = self.lines.iter().rposition(|l| l.proc == line.proc) {
+            self.bytes = self.bytes - self.lines[idx].text.len() + line.text.len();
             self.lines[idx] = line;
-            return;
+        } else {
+            self.bytes += line.text.len();
+            self.lines.push_back(line);
         }
-        if self.lines.len() == self.cap {
-            self.lines.pop_front();
+        // The newest line always stays, so a single line over budget is shown.
+        while self.lines.len() > 1 && (self.lines.len() > self.cap || self.bytes > self.byte_cap) {
+            if let Some(old) = self.lines.pop_front() {
+                self.bytes -= old.text.len();
+            }
         }
-        self.lines.push_back(line);
+    }
+
+    /// Bytes of text held.
+    pub fn bytes(&self) -> usize {
+        self.bytes
     }
 
     pub fn len(&self) -> usize {
@@ -430,7 +457,7 @@ impl LogStore {
     pub fn view(&self, filter: Option<&str>) -> Vec<&LogLine> {
         self.lines
             .iter()
-            .filter(|l| filter.is_none_or(|f| l.proc == f))
+            .filter(|l| filter.is_none_or(|f| &*l.proc == f))
             .collect()
     }
 }
@@ -634,10 +661,10 @@ impl AppState {
             .take(LOG_PAGE)
             .map(|l| LogSnapshot {
                 seq: l.seq,
-                proc: l.proc.clone(),
+                proc: l.proc.to_string(),
                 // The overlay does its own styling; raw escapes would render as
                 // garbage inside a <pre>.
-                text: crate::proc::strip_ansi(&l.text),
+                text: crate::proc::strip_ansi(&l.text).into_owned(),
             })
             .collect()
     }
@@ -800,6 +827,28 @@ mod tests {
         }
         assert_eq!(s.len(), 3);
         assert_eq!(s.view(None)[0].text, "l7");
+    }
+
+    #[test]
+    fn the_store_is_bounded_by_bytes_as_well_as_lines() {
+        let mut s = LogStore::with_byte_cap(1000, 100);
+        for i in 0..50 {
+            s.push(line("api", &format!("{i:08}"), false));
+        }
+        assert!(s.bytes() <= 100, "{} bytes held", s.bytes());
+        assert_eq!(s.len(), 12, "the newest twelve 8-byte lines");
+        assert_eq!(s.view(None).last().unwrap().text, "00000049");
+        // Progress frames replace each other, and the count follows.
+        s.push(line("api", "50%", true));
+        s.push(line("api", "100%", true));
+        assert_eq!(
+            s.bytes(),
+            s.view(None).iter().map(|l| l.text.len()).sum::<usize>()
+        );
+        // A line bigger than the whole budget is still the one shown.
+        s.push(line("api", &"x".repeat(500), false));
+        assert_eq!(s.len(), 1);
+        assert_eq!(s.bytes(), 500);
     }
 
     #[test]

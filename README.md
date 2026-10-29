@@ -23,6 +23,10 @@ The pieces exist separately and none of them compose:
 | cargo-watch | ✕ | ✅ | ✕ | ✕ |
 | **turborust** | ✅ | ✅ | ✅ | ✅ |
 
+It is also measured against them, not just compared: start and stop times,
+idle cost, output throughput, edit-to-restart latency, and what each leaves
+running when it is stopped or killed. See [docs/benchmarks.md](docs/benchmarks.md).
+
 ## The part that matters for Rust
 
 You name a crate. turborust asks `cargo metadata` for that crate's **path-dependency

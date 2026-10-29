@@ -938,7 +938,7 @@ impl Engine {
     fn log(&self, proc: &str, text: String) {
         let _ = self.events_tx.send(ProcEvent::Line(crate::proc::LogLine {
             seq: crate::proc::next_seq(),
-            proc: proc.to_string(),
+            proc: proc.into(),
             text: format!("\u{1b}[2m[turborust]\u{1b}[0m {text}"),
             transient: false,
         }));
@@ -1010,7 +1010,10 @@ pub async fn run_once_until(
 /// a reachability question over the dependency graph, which is what makes the
 /// reverse index worth having.
 async fn await_all_tasks(engine: &Engine, tasks: &[String]) -> i32 {
+    // Woken by status changes, which is all these answers depend on.
+    let mut board = engine.watch_board();
     loop {
+        board.borrow_and_update();
         let (failed, blocked, settled) = {
             let st = engine.state.lock().unwrap();
             let failed: Vec<String> = tasks
@@ -1071,13 +1074,18 @@ async fn await_all_tasks(engine: &Engine, tasks: &[String]) -> i32 {
                 })
                 .unwrap_or(1);
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        if board.changed().await.is_err() {
+            return 1;
+        }
     }
 }
 
 /// Blocks until every task has finished, or something makes finishing impossible.
 async fn await_tasks(engine: &Engine, tasks: &[String]) -> i32 {
+    // Woken by status changes, which is all these answers depend on.
+    let mut board = engine.watch_board();
     loop {
+        board.borrow_and_update();
         {
             let st = engine.state.lock().unwrap();
 
@@ -1116,7 +1124,9 @@ async fn await_tasks(engine: &Engine, tasks: &[String]) -> i32 {
                 return 0;
             }
         }
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        if board.changed().await.is_err() {
+            return 1;
+        }
     }
 }
 
@@ -1136,12 +1146,7 @@ fn fmt_limit(d: Duration) -> String {
 }
 
 async fn wait_exit(handle: &dyn Child) -> i32 {
-    loop {
-        if let Some(code) = handle.try_exit_code() {
-            return code;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    handle.exited().await
 }
 
 /// Wiring for one supervised node: its control queue. Readiness is not
@@ -1208,7 +1213,8 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                 } else {
                     None
                 };
-                next_event(&mut board, &mut ctl, &mut timers, watching).await
+                let board = (!node.depends_on.is_empty()).then_some(&mut board);
+                next_event(board, &mut ctl, &mut timers, watching).await
             }
         };
         if let Event::Exited(_) = ev {
@@ -1339,7 +1345,10 @@ async fn supervise_task(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiver)
     loop {
         let ev = match queue.pop_front() {
             Some(ev) => ev,
-            None => next_event(&mut board, &mut ctl, &mut timers, None).await,
+            None => {
+                let board = (!node.depends_on.is_empty()).then_some(&mut board);
+                next_event(board, &mut ctl, &mut timers, None).await
+            }
         };
         board.borrow_and_update();
         let deps = engine.dep_view(&node.depends_on);
@@ -1374,7 +1383,7 @@ async fn supervise_task(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiver)
 /// Waits for whatever happens next to a node: its child exiting, a timer, the
 /// board ticking, or a control message.
 async fn next_event(
-    board: &mut watch::Receiver<u64>,
+    board: Option<&mut watch::Receiver<u64>>,
     ctl: &mut ctl::Receiver,
     timers: &mut BTreeMap<lifecycle::Timer, tokio::time::Instant>,
     child: Option<&dyn Child>,
@@ -1403,13 +1412,26 @@ async fn next_event(
             timers.remove(&t);
             Event::Timer(t)
         }
-        changed = board.changed() => {
+        changed = board_changed(board) => {
             if changed.is_err() { Event::Stop } else { Event::Board }
         }
         msg = ctl.recv() => match msg {
             Some(Ctl::Restart(r)) => Event::Restart(r),
             Some(Ctl::Stop) | None => Event::Stop,
         },
+    }
+}
+
+/// The next tick of the board, for a node that has dependencies to watch.
+///
+/// A node with none never asks. Every status change ticks the board, and a node
+/// with nothing to wait for has no reason to wake for any of them.
+async fn board_changed(
+    board: Option<&mut watch::Receiver<u64>>,
+) -> Result<(), watch::error::RecvError> {
+    match board {
+        Some(b) => b.changed().await,
+        None => std::future::pending().await,
     }
 }
 
@@ -1446,78 +1468,100 @@ pub async fn pump_events_with(
     mut rx: mpsc::UnboundedReceiver<ProcEvent>,
     mut reporter: Option<crate::output::Reporter>,
 ) {
-    while let Some(ev) = rx.recv().await {
-        match ev {
-            ProcEvent::Line(line) => {
-                let plain = proc::strip_ansi(&line.text);
-                {
-                    let mut st = state.lock().unwrap();
-                    // Cargo's package-cache lock is a global mutex across the
-                    // workspace. Without surfacing it, a blocked build is
-                    // indistinguishable from a hang.
-                    if let Some(n) = st.nodes.get_mut(&line.proc) {
-                        if plain.contains("Blocking waiting for file lock") {
-                            n.blocked_on_cargo_lock = true;
-                        } else if plain.contains("Compiling") || plain.contains("Finished") {
-                            n.blocked_on_cargo_lock = false;
-                        }
-                        // cargo re-announces "Compiling" at the top of each attempt,
-                        // which is the earliest reliable signal that previous
-                        // diagnostics are stale.
-                        if plain.trim_start().starts_with("Compiling")
-                            || plain.trim_start().starts_with("Checking")
-                        {
-                            n.diag.reset();
-                        }
-                        // A self-managed rebuild starting. Checked before readiness,
-                        // so a line that is both reads as a rebuild that finished.
-                        if let Some(pattern) = &n.reload_pattern
-                            && plain.contains(pattern.as_str())
-                        {
-                            n.reload_matches += 1;
-                            n.ready_matches_at_reload = n.ready_matches;
-                            // Here rather than when the supervisor next looks: the
-                            // errors this rebuild prints may already be on their
-                            // way, and resetting later would throw them away.
-                            n.diag.reset();
-                        }
-                        // Readiness by announcement: matched on stripped text, so
-                        // a colourised "Listening on ..." still counts.
-                        if let Some(pattern) = &n.ready_pattern
-                            && plain.contains(pattern.as_str())
-                        {
-                            n.log_ready = true;
-                            n.ready_matches += 1;
-                        }
-                        n.diag.push_line(&line.text);
+    // Drained in batches under one lock: a chatty build sends thousands of
+    // lines a second, and taking the state lock once per line made the UI and
+    // the supervisors queue behind it.
+    let mut batch = Vec::with_capacity(EVENT_BATCH);
+    while rx.recv_many(&mut batch, EVENT_BATCH).await > 0 {
+        let mut guard = None;
+        for ev in batch.drain(..) {
+            let ev = match ev {
+                ProcEvent::Line(line) => {
+                    let st = guard.get_or_insert_with(|| state.lock().unwrap());
+                    // Into the reporter's buffer, which is memory: nothing
+                    // reaches stdout until `sync`, after the lock is let go.
+                    if let Some(r) = reporter.as_mut() {
+                        r.line(&line);
                     }
-                    st.logs.push(line.clone());
+                    ingest_line(st, line);
+                    continue;
                 }
-                if let Some(r) = reporter.as_mut() {
-                    r.line(&line);
+                other => other,
+            };
+            drop(guard.take());
+            match ev {
+                ProcEvent::Line(_) => unreachable!("handled above"),
+                ProcEvent::Started { proc, pid } => {
+                    let mut st = state.lock().unwrap();
+                    if st.nodes.get(&proc).is_some_and(|n| n.pid != pid) {
+                        st.record(&proc, Fact::Pid(pid));
+                    }
                 }
-            }
-            ProcEvent::Started { proc, pid } => {
-                let mut st = state.lock().unwrap();
-                if st.nodes.get(&proc).is_some_and(|n| n.pid != pid) {
-                    st.record(&proc, Fact::Pid(pid));
+                // A node's outcome is what decides whether its buffered output is
+                // worth showing, so the reporter is told here rather than guessing.
+                ProcEvent::Exited { proc, code } => {
+                    if let Some(r) = reporter.as_mut() {
+                        r.mark_ran(&proc);
+                        r.finish(&proc, code != 0);
+                    }
                 }
-            }
-            // A node's outcome is what decides whether its buffered output is
-            // worth showing, so the reporter is told here rather than guessing.
-            ProcEvent::Exited { proc, code } => {
-                if let Some(r) = reporter.as_mut() {
-                    r.mark_ran(&proc);
-                    r.finish(&proc, code != 0);
-                }
-            }
-            ProcEvent::Failed { proc, .. } => {
-                if let Some(r) = reporter.as_mut() {
-                    r.finish(&proc, true);
+                ProcEvent::Failed { proc, .. } => {
+                    if let Some(r) = reporter.as_mut() {
+                        r.finish(&proc, true);
+                    }
                 }
             }
         }
+        drop(guard);
+        // Once per batch: nothing shown waits longer than the pump is busy.
+        if let Some(r) = reporter.as_mut() {
+            r.sync();
+        }
     }
+}
+
+/// Events taken from the queue at a time.
+const EVENT_BATCH: usize = 512;
+
+/// What one line of output does to the shared state.
+fn ingest_line(st: &mut AppState, line: proc::LogLine) {
+    let plain = proc::strip_ansi(&line.text);
+    if let Some(n) = st.nodes.get_mut(&*line.proc) {
+        if plain.contains("Blocking waiting for file lock") {
+            n.blocked_on_cargo_lock = true;
+        } else if plain.contains("Compiling") || plain.contains("Finished") {
+            n.blocked_on_cargo_lock = false;
+        }
+        // cargo re-announces "Compiling" at the top of each attempt,
+        // which is the earliest reliable signal that previous
+        // diagnostics are stale.
+        if plain.trim_start().starts_with("Compiling") || plain.trim_start().starts_with("Checking")
+        {
+            n.diag.reset();
+        }
+        // A self-managed rebuild starting. Checked before readiness,
+        // so a line that is both reads as a rebuild that finished.
+        if let Some(pattern) = &n.reload_pattern
+            && plain.contains(pattern.as_str())
+        {
+            n.reload_matches += 1;
+            n.ready_matches_at_reload = n.ready_matches;
+            // Here rather than when the supervisor next looks: the
+            // errors this rebuild prints may already be on their
+            // way, and resetting later would throw them away.
+            n.diag.reset();
+        }
+        // Readiness by announcement: matched on stripped text, so
+        // a colourised "Listening on ..." still counts.
+        if let Some(pattern) = &n.ready_pattern
+            && plain.contains(pattern.as_str())
+        {
+            n.log_ready = true;
+            n.ready_matches += 1;
+        }
+        n.diag.push_plain(&plain);
+    }
+    st.logs.push(line);
 }
 
 /// Stops every node in reverse dependency order and waits for each to finish.
@@ -1532,34 +1576,67 @@ pub async fn shutdown(
 ) {
     engine.state.lock().unwrap().shutting_down = true;
 
-    for name in engine.plan.order.iter().rev() {
-        let Some(w) = wires.get(name) else { continue };
-        w.ctl_tx.send(Ctl::Stop);
-
-        let Some(handle) = supervisors.remove(name) else {
-            continue;
-        };
-        let stop_timeout = engine
-            .plan
-            .get(name)
-            .map(|n| n.stop_timeout)
-            .unwrap_or(Duration::from_secs(8));
-        // A task mid-run is waiting on its child, not reading its mail. Ending
-        // the child is what lets its supervisor see the Stop at all; without
-        // this the wait below timed out and the task was left running.
-        if engine.plan.get(name).is_ok_and(|n| n.kind == Kind::Task)
-            && let Some(child) = engine.handle_for(name)
-        {
-            child.stop(stop_timeout).await;
-        }
-        let grace = stop_timeout + Duration::from_secs(2);
-        if tokio::time::timeout(grace, handle).await.is_err() {
-            engine.log(
-                name,
-                "supervisor did not exit within its stop timeout".into(),
-            );
-        }
+    // Wave by wave: everything in a wave stops at once, and a wave starts only
+    // when the one before it, every dependent of its nodes, is gone.
+    for wave in engine.plan.stop_waves() {
+        let stops: Vec<_> = wave
+            .iter()
+            .filter_map(|name| {
+                let w = wires.get(name)?;
+                w.ctl_tx.send(Ctl::Stop);
+                let handle = supervisors.remove(name)?;
+                Some(stop_one(engine, name, handle))
+            })
+            .collect();
+        join_all(stops).await;
     }
+}
+
+async fn stop_one(engine: &Engine, name: &str, handle: tokio::task::JoinHandle<()>) {
+    let stop_timeout = engine
+        .plan
+        .get(name)
+        .map(|n| n.stop_timeout)
+        .unwrap_or(Duration::from_secs(8));
+    // A task mid-run is waiting on its child, not reading its mail. Ending
+    // the child is what lets its supervisor see the Stop at all; without
+    // this the wait below timed out and the task was left running.
+    if engine.plan.get(name).is_ok_and(|n| n.kind == Kind::Task)
+        && let Some(child) = engine.handle_for(name)
+    {
+        child.stop(stop_timeout).await;
+    }
+    let grace = stop_timeout + Duration::from_secs(2);
+    if tokio::time::timeout(grace, handle).await.is_err() {
+        engine.log(
+            name,
+            "supervisor did not exit within its stop timeout".into(),
+        );
+    }
+}
+
+/// Runs borrowed futures to completion together, on this task.
+async fn join_all<F: std::future::Future<Output = ()>>(futures: Vec<F>) {
+    let mut futures: Vec<Option<std::pin::Pin<Box<F>>>> =
+        futures.into_iter().map(|f| Some(Box::pin(f))).collect();
+    std::future::poll_fn(|cx| {
+        let mut pending = false;
+        for slot in futures.iter_mut() {
+            if let Some(f) = slot {
+                if f.as_mut().poll(cx).is_ready() {
+                    *slot = None;
+                } else {
+                    pending = true;
+                }
+            }
+        }
+        if pending {
+            std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
+        }
+    })
+    .await
 }
 
 /// Supervisor tasks, taken by `shutdown` so each can be awaited by name.

@@ -11,6 +11,7 @@
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::Path;
+use std::sync::{Arc, OnceLock};
 
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct GlobalHash {
@@ -21,16 +22,52 @@ pub struct GlobalHash {
     pub config: Option<String>,
     /// Content hash of the lockfile, if the workspace has one.
     pub lockfile: Option<String>,
+    /// `rustc -V` still running, when `toolchain` has not been filled in yet.
+    ///
+    /// Through rustup's proxy it takes over 100ms, and only a cache key needs
+    /// the answer. Starting it here and waiting only when a key is built lets
+    /// every service start without paying for it.
+    #[serde(skip)]
+    pub probe: Option<Arc<OnceLock<Option<String>>>>,
 }
 
 impl GlobalHash {
     pub fn compute(root: &Path, config_text: Option<&str>) -> GlobalHash {
+        let probe = Arc::new(OnceLock::new());
+        let slot = probe.clone();
+        let spawned = std::thread::Builder::new()
+            .name("rustc-version".into())
+            .spawn(move || {
+                let _ = slot.set(rustc_version());
+            });
+        if spawned.is_err() {
+            let _ = probe.set(rustc_version());
+        }
         GlobalHash {
-            toolchain: rustc_version(),
+            toolchain: None,
             config: config_text.map(|t| short(t.as_bytes())),
             lockfile: std::fs::read(root.join("Cargo.lock"))
                 .ok()
                 .map(|b| short(&b)),
+            probe: Some(probe),
+        }
+    }
+
+    /// The toolchain, waiting for the probe if it is still running.
+    pub fn toolchain(&self) -> Option<String> {
+        match (&self.toolchain, &self.probe) {
+            (Some(t), _) => Some(t.clone()),
+            (None, Some(p)) => p.wait().clone(),
+            (None, None) => None,
+        }
+    }
+
+    /// This hash with the probe's answer filled in, for writing down.
+    pub fn settled(&self) -> GlobalHash {
+        GlobalHash {
+            toolchain: self.toolchain(),
+            probe: None,
+            ..self.clone()
         }
     }
 
@@ -40,8 +77,8 @@ impl GlobalHash {
     /// anonymous hash change — the whole point is being able to attribute a miss.
     pub fn meta(&self) -> BTreeMap<String, String> {
         let mut m = BTreeMap::new();
-        if let Some(v) = &self.toolchain {
-            m.insert("global:toolchain".into(), v.clone());
+        if let Some(v) = self.toolchain() {
+            m.insert("global:toolchain".into(), v);
         }
         if let Some(v) = &self.config {
             m.insert("global:config".into(), v.clone());
@@ -85,11 +122,26 @@ mod tests {
     }
 
     #[test]
+    fn the_toolchain_probe_is_waited_for_and_written_down() {
+        let g = GlobalHash::compute(&std::env::temp_dir(), None);
+        assert!(g.toolchain.is_none(), "probed in the background");
+        let settled = g.settled();
+        assert_eq!(settled.toolchain, g.toolchain());
+        assert!(settled.probe.is_none());
+        assert_eq!(
+            g.meta().get("global:toolchain"),
+            settled.toolchain.as_ref(),
+            "a key waits for the answer rather than leaving it out"
+        );
+    }
+
+    #[test]
     fn meta_keys_are_attributable() {
         let g = GlobalHash {
             toolchain: Some("rustc 1.98.1".into()),
             config: Some("abc".into()),
             lockfile: None,
+            probe: None,
         };
         let m = g.meta();
         assert_eq!(
@@ -108,6 +160,7 @@ mod tests {
             toolchain: None,
             config: Some("x".into()),
             lockfile: None,
+            probe: None,
         };
         assert!(!g.meta().is_empty());
     }

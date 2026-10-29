@@ -165,8 +165,11 @@ pub struct Service {
     pub backoff_max: String,
 }
 
+/// watchexec's default, and long enough to take an editor's save — write,
+/// rename, chmod — as one change. It was 120ms, which made a restart wait twice
+/// as long as watchexec's for nothing measured (cairn 0111).
 fn d_debounce() -> String {
-    "120ms".into()
+    "50ms".into()
 }
 fn d_ready_timeout() -> String {
     "60s".into()
@@ -1001,7 +1004,48 @@ fn find_config() -> Result<PathBuf> {
 }
 
 /// The git repository a path belongs to, shared by all of its worktrees.
+///
+/// Read from `.git` directly, which is what git itself does: starting git to
+/// ask cost ~25ms on every `up` and `run`, before anything could start. Git is
+/// still asked when the layout is not one this recognises.
 fn repository_identity(root: &Path) -> Option<PathBuf> {
+    match git_dir_on_disk(root) {
+        Some(found) => found,
+        None => repository_identity_from_git(root),
+    }
+}
+
+/// `Some(None)`: certainly not in a repository. `None`: cannot tell.
+fn git_dir_on_disk(root: &Path) -> Option<Option<PathBuf>> {
+    let mut dir = root.canonicalize().ok()?;
+    loop {
+        let dot = dir.join(".git");
+        if dot.is_dir() {
+            return Some(Some(dot));
+        }
+        if dot.is_file() {
+            // A worktree or a submodule: `gitdir: <path>`, and for a worktree a
+            // `commondir` inside it naming the repository it shares.
+            let text = std::fs::read_to_string(&dot).ok()?;
+            let gitdir = Path::new(text.strip_prefix("gitdir:")?.trim());
+            let gitdir = dir.join(gitdir).canonicalize().ok()?;
+            return Some(Some(
+                match std::fs::read_to_string(gitdir.join("commondir")) {
+                    Ok(common) => gitdir.join(common.trim()).canonicalize().ok()?,
+                    Err(_) => gitdir,
+                },
+            ));
+        }
+        if dot.exists() {
+            return None;
+        }
+        if !dir.pop() {
+            return Some(None);
+        }
+    }
+}
+
+fn repository_identity_from_git(root: &Path) -> Option<PathBuf> {
     // Via `git_command`, which strips the variables git exports into every hook.
     // A partial list here would be a second place to get this wrong, and it is
     // already wrong-by-default: a hook invoking turborust makes a plain `git`
@@ -1224,6 +1268,44 @@ mod tests {
         // …and it is not inside either checkout.
         assert!(!primary.store_dir().starts_with(&repo));
 
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Reading `.git` must name the same repository git does, or every cache
+    /// would go cold once on upgrade and worktrees could stop sharing a store.
+    #[test]
+    fn the_repository_read_from_disk_is_the_one_git_names() {
+        let base = std::env::temp_dir().join(format!("tr-ident-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let repo = base.join("repo");
+        std::fs::create_dir_all(repo.join("sub/deeper")).unwrap();
+        git(&["init", "-q", "."], &repo);
+        assert_owns_its_repo(&repo);
+        git(&["config", "user.email", "a@b.c"], &repo);
+        git(&["config", "user.name", "t"], &repo);
+        std::fs::write(repo.join("sub/f"), "x").unwrap();
+        git(&["add", "-A"], &repo);
+        git(&["commit", "-qm", "init"], &repo);
+        git(&["worktree", "add", "-q", "../wt"], &repo);
+        let lone = base.join("lone");
+        std::fs::create_dir_all(&lone).unwrap();
+
+        for dir in [
+            repo.clone(),
+            repo.join("sub/deeper"),
+            base.join("wt"),
+            base.join("wt/sub"),
+            lone,
+        ] {
+            let canon = |p: Option<PathBuf>| p.map(|p| p.canonicalize().unwrap());
+            let from_disk = git_dir_on_disk(&dir).expect("a layout this reads");
+            assert_eq!(
+                canon(from_disk),
+                canon(repository_identity_from_git(&dir)),
+                "for {}",
+                dir.display()
+            );
+        }
         let _ = std::fs::remove_dir_all(&base);
     }
 

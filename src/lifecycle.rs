@@ -1012,6 +1012,13 @@ impl Service {
             .started
             .map(|s| now.saturating_duration_since(s))
             .unwrap_or_default();
+        // A run that outlasted the longest backoff ended a crash loop if there
+        // was one, so this crash starts the delays over — the same line the
+        // crash count uses. Without a probe nothing else resets them, and a
+        // service that crashed once a day waited longer each day (cairn 0111).
+        if ran > self.crashes.settled {
+            self.backoff = self.cfg.backoff_min;
+        }
         if self.crashes.exhausted(ran) {
             self.give_up(code, out);
             return;
