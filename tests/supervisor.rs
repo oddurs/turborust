@@ -1397,16 +1397,18 @@ async fn a_crash_loop_gives_up_after_max_restarts_and_an_edit_brings_it_back() {
 #[tokio::test]
 async fn a_run_that_lasted_is_not_part_of_a_crash_loop() {
     // The third run stays up longer than backoff_max, so the crash that ends
-    // it starts the count again: two more restarts before giving up.
+    // it starts the count again: two more restarts before giving up. The
+    // margins are wide both ways: a quick crash is a shell starting, which on
+    // a loaded CI runner took over 200ms and was counted as having lasted.
     let mut h = Harness::start(
         "crash-settled",
         r#"
         [services.api]
-        cmd = "n=$(cat runs 2>/dev/null | wc -l); echo . >> runs; if [ $n -eq 2 ]; then sleep 0.6; fi; exit 3"
+        cmd = "n=$(cat runs 2>/dev/null | wc -l); echo . >> runs; if [ $n -eq 2 ]; then sleep 2.5; fi; exit 3"
         restart = "always"
         max_restarts = 2
         backoff_min = "10ms"
-        backoff_max = "200ms"
+        backoff_max = "1s"
         "#,
         &["api"],
     );
