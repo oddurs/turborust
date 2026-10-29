@@ -73,3 +73,9 @@ tokio = { version = "1.53.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync", "time"] }
 toml = "1.1.5"
 tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
+
+# Paused time for tests/engine_sim.rs, which runs the engine on a clock that
+# moves only when every task is waiting (cairn 0106). Dev only: the shipped
+# binary is built without it.
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["full", "test-util"] }
