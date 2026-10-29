@@ -316,6 +316,13 @@
           "type": "boolean",
           "default": false
         },
+        "profile": {
+          "description": "Log each task run under `.turborust/` for `turborust doctor --profile`.\nLocal only, never sent anywhere. Default on; `TURBORUST_PROFILE=off`\nalso turns it off.",
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "task_timeout": {
           "description": "The longest any task may run, unless it sets its own `timeout`.",
           "type": [

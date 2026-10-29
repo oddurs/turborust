@@ -21,6 +21,7 @@ pub mod overlay;
 pub mod plan;
 pub mod proc;
 pub mod procfile;
+pub mod profile;
 pub mod proxy;
 pub mod serve;
 pub mod signals;

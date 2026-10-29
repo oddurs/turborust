@@ -42,6 +42,8 @@ pub struct TaskOutcome {
     pub code: i32,
     pub duration: Duration,
     pub fingerprint: Option<Fingerprint>,
+    /// Why it was not a hit, as `profile::reasons` names it. Empty for a hit.
+    pub why: Vec<String>,
 }
 
 pub struct Engine {
@@ -741,6 +743,27 @@ impl Engine {
     }
 
     /// Runs a task, honouring the cache. Never restarts; that is the caller's job.
+    /// Logs a finished run for `doctor --profile` (cairn 0075).
+    ///
+    /// Called before the run's final status is set, never after: setting it can
+    /// end the whole run, and a record written after that is a race with exit.
+    /// The last task of every `run` was lost that way.
+    fn profile_run(&self, name: &str, began: Instant, cached: bool, ok: bool, why: &[String]) {
+        if !self.plan.profile {
+            return;
+        }
+        let record = crate::profile::RunRecord {
+            at: crate::summary::now_secs(),
+            node: name.to_string(),
+            ms: began.elapsed().as_millis() as u64,
+            cached,
+            ok,
+            why: why.to_vec(),
+        };
+        // Measurement must never fail a run.
+        let _ = crate::profile::Log::at(&self.plan.root.join(".turborust")).append(&record);
+    }
+
     pub async fn run_task(&self, name: &str, force: bool) -> Result<TaskOutcome> {
         let node = self.plan.get(name)?.clone();
         let start = Instant::now();
@@ -794,8 +817,11 @@ impl Engine {
             {
                 self.cache.forget(name, &fp.hash);
                 self.log(name, failure.clone());
+                let why = vec!["unservable".to_string()];
+                self.profile_run(name, start, false, false, &why);
                 self.set(name, Status::Failed(1));
                 return Ok(TaskOutcome {
+                    why,
                     cached: false,
                     code: 1,
                     duration: start.elapsed(),
@@ -814,6 +840,7 @@ impl Engine {
                 }
                 let d = Duration::from_millis(rec.duration_ms);
                 self.record_build(name, true, d, fp, Vec::new());
+                self.profile_run(name, start, true, true, &[]);
                 self.set(
                     name,
                     Status::Done {
@@ -839,31 +866,51 @@ impl Engine {
                     code: 0,
                     duration: d,
                     fingerprint: Some(fp.clone()),
+                    why: Vec::new(),
                 });
             }
         }
 
         // A miss is worth explaining before the build starts, not after.
-        let changed = match (&fp, self.cache.load_latest(name)) {
-            (Some(now), Some(prev)) => cache::diff(&prev.fingerprint, now)
-                .iter()
-                .filter_map(|c| match c {
-                    cache::Change::Modified { path, from, to } => Some(crate::state::ChangedFile {
-                        path: path.clone(),
-                        from: from.chars().take(8).collect(),
-                        to: to.chars().take(8).collect(),
-                    }),
-                    cache::Change::Added(path, to) => Some(crate::state::ChangedFile {
-                        path: path.clone(),
-                        from: "new".into(),
-                        to: to.chars().take(8).collect(),
-                    }),
-                    _ => None,
-                })
-                .take(20)
-                .collect(),
+        let previous = fp.as_ref().and_then(|_| self.cache.load_latest(name));
+        let diff = match (&fp, &previous) {
+            (Some(now), Some(prev)) => cache::diff(&prev.fingerprint, now),
             _ => Vec::new(),
         };
+        let why: Vec<String> = if fp.is_none() {
+            vec!["no inputs".into()]
+        } else if force {
+            vec!["forced".into()]
+        } else if node.cache != crate::config::CachePolicy::Enabled {
+            vec!["cache disabled".into()]
+        } else if node.env_mode == EnvMode::Loose {
+            vec!["loose env".into()]
+        } else if previous.is_none() {
+            vec!["first run".into()]
+        } else if diff.is_empty() {
+            // The key is the last one's, and still no hit: that run failed, or
+            // what it built is gone.
+            vec!["unservable".into()]
+        } else {
+            crate::profile::reasons(&diff)
+        };
+        let changed = diff
+            .iter()
+            .filter_map(|c| match c {
+                cache::Change::Modified { path, from, to } => Some(crate::state::ChangedFile {
+                    path: path.clone(),
+                    from: from.chars().take(8).collect(),
+                    to: to.chars().take(8).collect(),
+                }),
+                cache::Change::Added(path, to) => Some(crate::state::ChangedFile {
+                    path: path.clone(),
+                    from: "new".into(),
+                    to: to.chars().take(8).collect(),
+                }),
+                _ => None,
+            })
+            .take(20)
+            .collect();
 
         // Held until this task finishes: running a task IS building.
         let _slot = self.acquire_slot(name).await;
@@ -880,11 +927,14 @@ impl Engine {
         let duration = start.elapsed();
 
         if timed_out {
-            // Already reported and marked failed by `wait_limited`.
+            // Already reported and marked failed by `wait_limited`, so this is
+            // best effort: the last task of a run can end it first.
+            self.profile_run(name, start, false, false, &why);
         } else if code == 0 {
             if let Some(fp) = &fp {
                 self.record_build(name, false, duration, fp, changed);
             }
+            self.profile_run(name, start, false, true, &why);
             self.set(
                 name,
                 Status::Done {
@@ -913,6 +963,7 @@ impl Engine {
             // failed would raise a failure notification for a ctrl-c.
             self.set(name, Status::Stopped);
         } else {
+            self.profile_run(name, start, false, false, &why);
             self.set(name, Status::Failed(code));
         }
         Ok(TaskOutcome {
@@ -920,6 +971,7 @@ impl Engine {
             code,
             duration,
             fingerprint: fp,
+            why,
         })
     }
 
