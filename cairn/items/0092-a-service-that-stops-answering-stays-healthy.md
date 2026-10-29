@@ -65,3 +65,14 @@ a rebuild is not an outage.
 Mutation-checked: never enabled fails 4 tests; acting on the first miss fails
 2; the fresh-sleep version fails the beside-reload test; probing a node that
 declares no liveness fails `a_node_without_liveness_is_never_probed_once_ready`.
+
+## 2026-10-29
+
+`a_service_that_stops_answering_goes_down_and_comes_back` failed once on macOS
+CI (on `#33`, after this merged): removing `alive` found no such file. A race in
+the test: with no readiness probe a service is healthy the moment it spawns, so
+"both healthy" could hold before the shell had run `touch alive`. Reproduced by
+delaying the touch 0.3s; the test now declares `health = { cmd = "test -f
+alive" }`, which makes healthy mean the file exists. Fixed on `0097`'s branch,
+the next to land. The two sibling tests were already safe: one writes the file
+itself, the other announces readiness after creating it.
