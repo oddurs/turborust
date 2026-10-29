@@ -810,6 +810,11 @@ async fn cmd_run(
     })
     .await?;
 
+    // Every line out before exiting, and no longer than that takes: this was a
+    // fixed 60ms sleep, paid by every run whether it printed anything or not.
+    // Before the summary, too: its issues are parsed from those lines, and a
+    // summary taken first missed the last ones whenever the machine was busy.
+    engine.drain_output(Duration::from_millis(200)).await;
     if output.summarize {
         // One guard: two `lock()`s in this literal would both live to the end
         // of the statement, and the second would wait on the first forever.
@@ -831,9 +836,6 @@ async fn cmd_run(
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());
     }
-    // Every line out before exiting, and no longer than that takes: this was a
-    // fixed 60ms sleep, paid by every run whether it printed anything or not.
-    engine.drain_output(Duration::from_millis(200)).await;
     Ok(code)
 }
 
