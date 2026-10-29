@@ -30,6 +30,8 @@ pub struct Node {
     pub cmd: Option<String>,
     pub cwd: PathBuf,
     pub env: BTreeMap<String, String>,
+    /// Project files, then the node's own; read when the node starts.
+    pub env_files: Vec<crate::envfile::EnvFile>,
     pub depends_on: Vec<String>,
     pub watch: Vec<String>,
     pub ignore: Vec<String>,
@@ -174,6 +176,29 @@ impl Plan {
     }
 }
 
+/// The project's env files and then the node's, loaded once here so a missing
+/// or malformed file is refused before anything runs.
+fn env_files(
+    ws: &Workspace,
+    name: &str,
+    own: Option<&crate::config::EnvFiles>,
+) -> Result<Vec<crate::envfile::EnvFile>> {
+    let files: Vec<crate::envfile::EnvFile> = ws
+        .config
+        .project
+        .env_file
+        .iter()
+        .chain(own)
+        .flat_map(|f| f.specs())
+        .map(|(path, required)| crate::envfile::EnvFile {
+            path: ws.root.join(path),
+            required,
+        })
+        .collect();
+    crate::envfile::load(&files).map_err(|e| anyhow::anyhow!("`{name}`: {e}"))?;
+    Ok(files)
+}
+
 pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
     let metadata = Metadata::load(&ws.root)?;
 
@@ -304,6 +329,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             cmd,
             cwd: ws.resolve_cwd(&s.cwd),
             env: s.env.clone(),
+            env_files: env_files(ws, name, s.env_file.as_ref())?,
             depends_on: s.depends_on.clone(),
             watch,
             ignore: s.ignore.clone(),
@@ -401,6 +427,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         cmd: Some(cmd),
         cwd: ws.resolve_cwd(&t.cwd),
         env: t.env.clone(),
+        env_files: env_files(ws, name, t.env_file.as_ref())?,
         depends_on: t.depends_on.clone(),
         watch: Vec::new(),
         ignore: t.ignore.clone(),

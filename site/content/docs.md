@@ -118,6 +118,10 @@ not change the build is to make sure the build never saw it. A `loose` task is
 never served from cache — being honestly uncacheable beats being occasionally
 wrong.
 
+`env_file = ".env"`, per node or under `[project]`, loads a dotenv file. Its
+values reach strict tasks and key them, by hash rather than by value; a missing
+file is an error unless marked `required = false`.
+
 A hit **replays** the archived outputs rather than assuming the tree was
 untouched, and results are stored by key, so alternating between two branches
 hits both ways.

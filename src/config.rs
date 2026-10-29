@@ -42,6 +42,9 @@ pub struct Project {
     /// parallelism, capped, because builds are memory-hungry rather than
     /// merely CPU-hungry.
     pub concurrency: Option<usize>,
+    /// `.env` files loaded into every node, before the node's own. Paths are
+    /// relative to the workspace root.
+    pub env_file: Option<EnvFiles>,
 }
 
 /// Hand-written rather than derived: `#[derive(Default)]` would give `ignore` an
@@ -55,6 +58,7 @@ impl Default for Project {
             ignore: default_ignore(),
             notify: false,
             concurrency: None,
+            env_file: None,
         }
     }
 }
@@ -96,6 +100,8 @@ pub struct Service {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// `.env` files for this node, after the project's and before inline `env`.
+    pub env_file: Option<EnvFiles>,
     /// Reclaimed before start and checked for readiness if no explicit health probe.
     pub port: Option<u16>,
     pub health: Option<Health>,
@@ -484,6 +490,46 @@ fn d_health_interval() -> String {
     "300ms".into()
 }
 
+/// `".env"`, `{ path = ".env.local", required = false }`, or a list of either.
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
+#[serde(untagged)]
+pub enum EnvFiles {
+    One(EnvFileSpec),
+    Many(Vec<EnvFileSpec>),
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
+#[serde(untagged)]
+pub enum EnvFileSpec {
+    Path(String),
+    Entry(EnvFileEntry),
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct EnvFileEntry {
+    pub path: String,
+    /// A missing required file is an error, so a typo is not a silently empty
+    /// environment. Default `true`.
+    #[serde(default = "d_true")]
+    pub required: bool,
+}
+
+impl EnvFiles {
+    pub fn specs(&self) -> Vec<(&str, bool)> {
+        let list = match self {
+            EnvFiles::One(s) => std::slice::from_ref(s),
+            EnvFiles::Many(v) => v.as_slice(),
+        };
+        list.iter()
+            .map(|s| match s {
+                EnvFileSpec::Path(p) => (p.as_str(), true),
+                EnvFileSpec::Entry(e) => (e.path.as_str(), e.required),
+            })
+            .collect()
+    }
+}
+
 pub fn d_probe_timeout() -> String {
     "5s".into()
 }
@@ -557,6 +603,8 @@ pub struct Task {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: BTreeMap<String, String>,
+    /// `.env` files for this node, after the project's and before inline `env`.
+    pub env_file: Option<EnvFiles>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Globs whose content hash forms the cache key. Empty inputs = never cached.

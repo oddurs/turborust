@@ -7,6 +7,7 @@ pub mod ctl;
 pub mod diag;
 pub mod doctor;
 pub mod engine;
+pub mod envfile;
 pub mod filter;
 pub mod global;
 pub mod graph;

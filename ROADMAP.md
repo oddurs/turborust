@@ -193,11 +193,10 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`######····` 53% · 8 of 15 done
+`######····` 60% · 9 of 15 done
 
 ### backlog
 
-- [ ] `0093` There is no way to load a .env file <sup>feature · p1</sup>
 - [ ] `0094` No polling fallback where file events do not arrive <sup>feature · p2</sup>
 - [ ] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
 - [ ] `0096` A crash loop never gives up <sup>feature · p3</sup>
@@ -215,4 +214,5 @@ Good ideas without a date yet.
 - [x] `0090` Survey local process managers, watchers and task runners <sup>chore · p2</sup>
 - [x] `0091` Readiness cannot run a command <sup>feature · p1</sup>
 - [x] `0092` A service that stops answering stays healthy <sup>feature · p1</sup>
+- [x] `0093` There is no way to load a .env file <sup>feature · p1</sup>
 
