@@ -53,3 +53,10 @@ never give up.
 
 Mutation-checked: never limiting, never settling, and not resetting on a change
 each fail a test.
+
+CI on macOS failed `a_run_that_lasted_is_not_part_of_a_crash_loop` with 6 runs
+for 5. The test, not the rule: with `backoff_max = "200ms"`, a "quick" crash (a
+shell starting, `cat | wc`) took longer than that on a loaded runner and was
+counted as having lasted. Reproduced locally by adding 0.3s to each quick run;
+the margins are now 1s against a 2.5s run, which passes with the same delay.
+The real default, 30s, is far from either.
