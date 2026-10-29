@@ -39,10 +39,22 @@ struct Harness {
 
 impl Harness {
     fn start(tag: &str, toml_src: &str, targets: &[&str]) -> Harness {
+        Self::start_in(tag, toml_src, targets, |_| {})
+    }
+
+    /// `start`, with the workspace laid out by `setup` before the plan is
+    /// resolved — which is when cargo is asked about it.
+    fn start_in(
+        tag: &str,
+        toml_src: &str,
+        targets: &[&str],
+        setup: impl FnOnce(&std::path::Path),
+    ) -> Harness {
         let dir = std::env::temp_dir().join(format!("turborust-sup-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.canonicalize().unwrap();
+        setup(&dir);
 
         let ws = Workspace {
             root: dir.clone(),
@@ -284,6 +296,68 @@ async fn one_edit_restarts_each_node_exactly_once() {
         before + 1,
         "one edit must produce exactly one restart"
     );
+    h.shutdown().await;
+}
+
+/// A test task declared by crate re-runs when a crate it depends on through a
+/// path changes, two levels down — the closure cargo reports, not a glob
+/// anyone wrote (cairn 0074).
+#[tokio::test]
+async fn a_test_task_reruns_when_a_transitive_path_dependency_changes() {
+    let mut h = Harness::start_in(
+        "transitive",
+        r#"
+        [tasks.test]
+        cargo = "app"
+        cmd = "echo . >> runs"
+        "#,
+        &["test"],
+        |root| {
+            let w = |p: &str, text: &str| {
+                let p = root.join(p);
+                std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+                std::fs::write(p, text).unwrap();
+            };
+            w("Cargo.toml", "[workspace]\nmembers = [\"crates/*\"]\nresolver = \"2\"\n");
+            for (name, dep) in [("app", Some("mid")), ("mid", Some("base")), ("base", None)] {
+                let deps = dep
+                    .map(|d| format!("{d} = {{ path = \"../{d}\" }}\n"))
+                    .unwrap_or_default();
+                w(
+                    &format!("crates/{name}/Cargo.toml"),
+                    &format!(
+                        "[package]\nname = \"{name}\"\nversion = \"0.0.0\"\nedition = \"2021\"\n\n[dependencies]\n{deps}"
+                    ),
+                );
+                w(&format!("crates/{name}/src/lib.rs"), "");
+            }
+        },
+    )
+    .with_watcher();
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while runs_in(&h) < 1 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(runs_in(&h), 1, "ran once to begin with");
+
+    // Two path dependencies away from the crate the task names.
+    std::fs::write(h.path("crates/base/src/lib.rs"), "pub fn changed() {}\n").unwrap();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    while runs_in(&h) < 2 && tokio::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        runs_in(&h),
+        2,
+        "an edit to `base` re-ran the test task of `app`"
+    );
+
+    // And an edit outside the closure does not.
+    std::fs::create_dir_all(h.path("unrelated")).unwrap();
+    std::fs::write(h.path("unrelated/notes.txt"), "x").unwrap();
+    tokio::time::sleep(Duration::from_millis(800)).await;
+    assert_eq!(runs_in(&h), 2, "an edit outside the closure did not");
     h.shutdown().await;
 }
 

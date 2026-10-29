@@ -706,6 +706,7 @@ async fn cmd_run(
             exit_code: code,
             global: plan.global.settled(),
             tasks: engine.outcomes(),
+            issues: engine.state.lock().unwrap().snapshot().issues,
         };
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());

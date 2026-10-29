@@ -520,7 +520,7 @@ pub struct Snapshot {
     pub shutting_down: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct IssueSnapshot {
     pub node: String,
     #[serde(flatten)]

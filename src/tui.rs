@@ -278,6 +278,14 @@ fn draw_sidebar(f: &mut Frame, area: Rect, st: &crate::state::AppState, engine: 
                 Color::DarkGray
             }),
         )));
+        // The first error, where it is: a failing test or a compile error is
+        // the reason the node is red, and it should not take opening the log.
+        if let Some(line) = first_error_line(&node.diag) {
+            lines.push(Line::from(Span::styled(
+                line,
+                Style::default().fg(Color::Red),
+            )));
+        }
     }
 
     let title = if st.shutting_down {
@@ -289,6 +297,20 @@ fn draw_sidebar(f: &mut Frame, area: Rect, st: &crate::state::AppState, engine: 
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
         area,
     );
+}
+
+/// `     2 errors · src/lib.rs:9:22`, or `None` when there are none.
+fn first_error_line(diag: &crate::diag::Parser) -> Option<String> {
+    let n = diag.errors();
+    let first = diag
+        .diagnostics()
+        .iter()
+        .find(|d| d.level == crate::diag::Level::Error)?;
+    let what = if n == 1 { "error" } else { "errors" };
+    let place = first
+        .location()
+        .unwrap_or_else(|| first.message.chars().take(20).collect());
+    Some(format!("     {n} {what} · {place}"))
 }
 
 fn draw_logs(f: &mut Frame, area: Rect, st: &crate::state::AppState, follow: bool) {
@@ -464,6 +486,24 @@ mod key_tests {
         assert_eq!(
             key_to_bytes(&key(KeyCode::Char('é'), KeyModifiers::NONE)),
             Some("é".as_bytes().to_vec())
+        );
+    }
+}
+
+#[cfg(test)]
+mod sidebar_tests {
+    use super::*;
+
+    #[test]
+    fn a_failing_test_shows_under_its_node() {
+        let mut p = crate::diag::Parser::new();
+        assert_eq!(first_error_line(&p), None);
+        p.push_line("thread 'tests::wrong_sum' (7) panicked at src/lib.rs:9:22:");
+        p.push_line("assertion `left == right` failed");
+        p.push_line("");
+        assert_eq!(
+            first_error_line(&p).as_deref(),
+            Some("     1 error · src/lib.rs:9:22")
         );
     }
 }

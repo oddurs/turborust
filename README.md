@@ -464,6 +464,10 @@ It surfaces four things:
   code, `file:line:col`, and the code frame with rustc's own hint. The location is
   a `vscode://` link. A build error takes over the viewport at 94% opacity over a
   blur, so a ghost of your app stays visible; fixing the error dismisses it.
+  A failing test is an issue too: `cargo test` and `cargo nextest` both print
+  `thread '<test>' panicked at <file>:<line>:<col>:`, and that line becomes the
+  test's name, its assertion message and a link to the line that panicked. The
+  same issues are in the TUI's sidebar and in `run --summarize`'s JSON.
 - **Processes** — every supervised service and task, with health, port, uptime,
   pid, restart count, and the file that caused the last restart.
 - **Last build** — cache hit or miss, the blake3 key, and the input hashes that
