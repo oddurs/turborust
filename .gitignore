@@ -10,3 +10,4 @@ CLAUDE.md
 # Rendered from cairn/items and published to the `roadmap` branch after each
 # merge (cairn 0109). A local `cairn render` is a preview; it is never committed.
 /ROADMAP.md
+/bench/.tools/

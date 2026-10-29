@@ -22,6 +22,10 @@ pub enum Kind {
     Task,
 }
 
+/// A service's `debounce` when it sets none; the config default, in one place
+/// for the nodes that have no config field for it.
+const DEFAULT_DEBOUNCE: Duration = Duration::from_millis(50);
+
 #[derive(Debug, Clone)]
 pub struct Node {
     pub name: String,
@@ -134,6 +138,51 @@ impl Plan {
         self.reach(name, |n| {
             self.dependents.get(n).cloned().unwrap_or_default()
         })
+    }
+
+    /// How long the shared watcher waits for quiet before acting: the shortest
+    /// `debounce` any service in the plan asks for, so a service that sets one
+    /// gets it. One watcher serves every node, so the shortest has to win.
+    pub fn watch_quiet(&self) -> Duration {
+        self.nodes
+            .values()
+            .filter(|n| n.kind == Kind::Service)
+            .map(|n| n.debounce)
+            .min()
+            .unwrap_or(DEFAULT_DEBOUNCE)
+    }
+
+    /// The order to stop nodes in, as waves that can each stop all at once.
+    ///
+    /// A node is in the wave after the last of its dependents, so nothing stops
+    /// while something that needs it is still running, and nothing waits on a
+    /// node it has no edge to. Stopping one node at a time made a stop of fifty
+    /// independent services take over a second.
+    pub fn stop_waves(&self) -> Vec<Vec<String>> {
+        let mut wave: BTreeMap<&str, usize> = BTreeMap::new();
+        // `order` puts every node after its dependencies, so walking it
+        // backwards meets every dependent before the node it depends on.
+        for name in self.order.iter().rev() {
+            let w = self
+                .dependents
+                .get(name)
+                .into_iter()
+                .flatten()
+                .filter_map(|d| wave.get(d.as_str()))
+                .map(|w| w + 1)
+                .max()
+                .unwrap_or(0);
+            wave.insert(name, w);
+        }
+        let mut waves: Vec<Vec<String>> = Vec::new();
+        for name in self.order.iter().rev() {
+            let w = wave[name.as_str()];
+            if waves.len() <= w {
+                waves.resize(w + 1, Vec::new());
+            }
+            waves[w].push(name.clone());
+        }
+        waves
     }
 
     /// Breadth-first reachability over whichever edge direction `edges` yields.
@@ -454,7 +503,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         health: None,
         serve: None,
         proxy: Vec::new(),
-        debounce: pd("120ms")?,
+        debounce: DEFAULT_DEBOUNCE,
         ready_timeout: pd("60s")?,
         stop_timeout: pd("8s")?,
         timeout: t
@@ -908,6 +957,47 @@ mod graph_tests {
         );
         assert_eq!(names(diamond().transitive_dependents("b")), vec!["a"]);
         assert!(diamond().transitive_dependents("a").is_empty());
+    }
+
+    #[test]
+    fn the_watcher_waits_as_briefly_as_its_most_eager_service_asks() {
+        let plan = |src: &str, targets: &[&str]| {
+            let ws = Workspace {
+                root: PathBuf::from("/w"),
+                config: toml::from_str::<Config>(src).unwrap(),
+                source: None,
+            };
+            let t: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+            resolve(&ws, &t).unwrap()
+        };
+        let src = r#"
+            [services.fast]
+            cmd = "x"
+            debounce = "30ms"
+            [services.plain]
+            cmd = "x"
+            [tasks.t]
+            cmd = "x"
+        "#;
+        assert_eq!(
+            plan(src, &["fast", "plain"]).watch_quiet(),
+            Duration::from_millis(30)
+        );
+        assert_eq!(plan(src, &["plain"]).watch_quiet(), DEFAULT_DEBOUNCE);
+        assert_eq!(plan(src, &["t"]).watch_quiet(), DEFAULT_DEBOUNCE);
+    }
+
+    #[test]
+    fn stop_waves_put_every_dependent_before_what_it_needs() {
+        let waves: Vec<Vec<String>> = diamond()
+            .stop_waves()
+            .into_iter()
+            .map(|mut w| {
+                w.sort();
+                w
+            })
+            .collect();
+        assert_eq!(waves, vec![vec!["a"], vec!["b", "c"], vec!["d"]]);
     }
 
     #[test]

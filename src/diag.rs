@@ -53,7 +53,15 @@ pub struct Parser {
     diagnostics: Vec<Diagnostic>,
     /// Index of the diagnostic currently collecting frame lines.
     open: Option<usize>,
+    /// Errors seen past the cap, still counted so the tally stays true.
+    dropped_errors: usize,
 }
+
+/// Diagnostics kept between resets. Only a new build resets, and a service
+/// that logs `error: connection refused` every second never builds again — so
+/// without a bound this grew for as long as `up` ran. The first ones are kept,
+/// as a compiler's first errors are the ones that explain the rest.
+const MAX_DIAGNOSTICS: usize = 256;
 
 impl Parser {
     pub fn new() -> Self {
@@ -65,6 +73,7 @@ impl Parser {
     pub fn reset(&mut self) {
         self.diagnostics.clear();
         self.open = None;
+        self.dropped_errors = 0;
     }
 
     pub fn diagnostics(&self) -> &[Diagnostic] {
@@ -76,14 +85,32 @@ impl Parser {
             .iter()
             .filter(|d| d.level == Level::Error)
             .count()
+            + self.dropped_errors
+    }
+
+    /// Keeps `d` if there is room; `false` if it was only counted.
+    fn keep(&mut self, d: Diagnostic) -> bool {
+        if self.diagnostics.len() >= MAX_DIAGNOSTICS {
+            if d.level == Level::Error {
+                self.dropped_errors += 1;
+            }
+            self.open = None;
+            return false;
+        }
+        self.diagnostics.push(d);
+        true
     }
 
     pub fn push_line(&mut self, raw: &str) {
-        let line = crate::proc::strip_ansi(raw);
+        self.push_plain(&crate::proc::strip_ansi(raw));
+    }
+
+    /// `push_line` for text already stripped of escapes.
+    pub fn push_plain(&mut self, line: &str) {
         let line = line.trim_end();
 
         if let Some(d) = parse_short(line) {
-            self.diagnostics.push(d);
+            self.keep(d);
             self.open = None;
             return;
         }
@@ -94,7 +121,7 @@ impl Parser {
                 self.open = None;
                 return;
             }
-            self.diagnostics.push(Diagnostic {
+            let kept = self.keep(Diagnostic {
                 level,
                 code,
                 message,
@@ -103,7 +130,7 @@ impl Parser {
                 column: None,
                 frame: Vec::new(),
             });
-            self.open = Some(self.diagnostics.len() - 1);
+            self.open = kept.then(|| self.diagnostics.len() - 1);
             return;
         }
 
@@ -300,6 +327,25 @@ error: could not compile `api` (bin "api") due to 1 previous error
             "   Compiling api v0.1.0\n    Finished dev profile in 0.21s\n     Running `target/debug/api`",
         );
         assert!(d.is_empty(), "{d:#?}");
+    }
+
+    #[test]
+    fn a_service_that_logs_errors_forever_holds_a_bounded_list() {
+        let mut p = Parser::new();
+        for i in 0..10_000 {
+            p.push_line(&format!("error: connection refused ({i})"));
+            p.push_line("  --> src/db.rs:1:1");
+            p.push_line("warning: retrying");
+        }
+        assert_eq!(p.diagnostics().len(), MAX_DIAGNOSTICS);
+        assert_eq!(p.errors(), 10_000, "every error still counted");
+        assert_eq!(
+            p.diagnostics()[0].message,
+            "connection refused (0)",
+            "the first kept"
+        );
+        p.reset();
+        assert_eq!(p.errors(), 0);
     }
 
     #[test]

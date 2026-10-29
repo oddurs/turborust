@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, watch};
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -30,7 +30,8 @@ pub fn next_seq() -> u64 {
 #[derive(Debug, Clone)]
 pub struct LogLine {
     pub seq: u64,
-    pub proc: String,
+    /// Shared rather than owned: one allocation per process, not per line.
+    pub proc: Arc<str>,
     pub text: String,
     /// Terminated by `\r`, not `\n` — a progress update that should overwrite the
     /// previous line rather than accumulate. cargo emits thousands of these.
@@ -85,6 +86,12 @@ pub struct Handle {
     /// the prompt was emitted before anyone was there to hear it, and it never
     /// ended a line so the log store does not have it either.
     scrollback: Arc<Mutex<VecDeque<u8>>>,
+    /// The exit code, once the child is seen to have gone.
+    ///
+    /// Something to await rather than poll: a supervisor polling every child
+    /// every 20ms was most of an idle `up`'s CPU, and its exits were seen up
+    /// to 20ms late.
+    exit: watch::Receiver<Option<i32>>,
 }
 
 impl Handle {
@@ -104,21 +111,44 @@ impl Handle {
                 libc::killpg(pid as libc::pid_t, libc::SIGTERM);
             }
         }
+        #[cfg(unix)]
         let deadline = tokio::time::Instant::now() + grace;
-        loop {
-            {
-                let mut c = self.child.lock().unwrap();
-                if c.try_wait().ok().flatten().is_some() {
-                    return Ok(());
-                }
-            }
-            if tokio::time::Instant::now() >= deadline {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
+        if tokio::time::timeout(grace, self.exited()).await.is_err() {
+            self.kill_now();
+            return Ok(());
         }
-        self.kill_now();
+        // The leader is gone; what it started may not be. A shell running
+        // `server & worker; wait` dies of the SIGTERM at once, while the two it
+        // started are still on their way out — or ignoring it. Stopped means
+        // the whole group, so the rest of the grace is theirs, then the kill.
+        #[cfg(unix)]
+        if let Some(pid) = self.pid {
+            while group_alive(pid as libc::pid_t) {
+                if tokio::time::Instant::now() >= deadline {
+                    self.kill_now();
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
         Ok(())
+    }
+
+    /// Resolves with the exit code once the child has exited.
+    pub async fn exited(&self) -> i32 {
+        let mut exit = self.exit.clone();
+        let seen = exit.wait_for(Option::is_some).await.map(|code| *code);
+        match seen {
+            Ok(code) => code.unwrap_or(-1),
+            // The wait thread is gone without a code: it could not have been
+            // started, so ask the child directly.
+            Err(_) => loop {
+                if let Some(code) = self.try_exit_code() {
+                    return code;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            },
+        }
     }
 
     /// Ends the child and everything it spawned, without waiting for anything.
@@ -302,7 +332,7 @@ pub fn spawn_with(
             // A zero-capacity send blocks until the parent receives, so returning
             // from `recv` below means this thread is on the next instruction.
             let _ = ready_tx.send(());
-            pump(reader, &pname, tx, raw_tx, scroll_tx)
+            pump(reader, &Arc::from(pname.as_str()), tx, raw_tx, scroll_tx)
         })
         .context("spawning pty reader thread")?;
     let _ = ready_rx.recv();
@@ -331,23 +361,48 @@ pub fn spawn_with(
     let waiter = child.clone();
     let tx = events.clone();
     let pname = name.to_string();
-    std::thread::Builder::new()
-        .name(format!("wait-{name}"))
-        .spawn(move || {
-            // `wait()` holds the lock, so poll instead and leave `stop()` free to
-            // take the lock and signal.
-            let code = loop {
-                {
-                    let mut c = waiter.lock().unwrap();
-                    if let Ok(Some(status)) = c.try_wait() {
-                        break status.exit_code() as i32;
+    let (exit_tx, exit) = watch::channel(None);
+    // Reaps the child once it has exited. On unix this succeeds first time;
+    // elsewhere, and if no notification could be set up, it polls.
+    let reap = move || loop {
+        {
+            let mut c = waiter.lock().unwrap();
+            if let Ok(Some(status)) = c.try_wait() {
+                break status.exit_code() as i32;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let finish = move |code: i32| {
+        let _ = exit_tx.send(Some(code));
+        let _ = tx.send(ProcEvent::Exited { proc: pname, code });
+    };
+    match exit_notifier(pid) {
+        // Linux: the kernel says when it has exited, and no thread waits for it.
+        // A thread per child was half of turborust's threads, and every thread
+        // makes the next fork slower.
+        Some(exited) => {
+            tokio::spawn(async move {
+                exited.await;
+                finish(reap());
+            });
+        }
+        None => {
+            std::thread::Builder::new()
+                .name(format!("wait-{name}"))
+                .spawn(move || {
+                    // Blocks until the child has exited without reaping it, so
+                    // the lock `reap` takes is free the whole time for `stop()`
+                    // to signal through.
+                    #[cfg(unix)]
+                    if let Some(pid) = pid {
+                        wait_without_reaping(pid);
                     }
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            };
-            let _ = tx.send(ProcEvent::Exited { proc: pname, code });
-        })
-        .context("spawning wait thread")?;
+                    finish(reap());
+                })
+                .context("spawning wait thread")?;
+        }
+    }
 
     Ok(Handle {
         name: name.to_string(),
@@ -359,7 +414,91 @@ pub fn spawn_with(
         writer: Mutex::new(writer),
         raw,
         scrollback,
+        exit,
     })
+}
+
+/// Resolves once `pid` has exited, without a thread: a pidfd turns readable
+/// when its process ends. `None` where there is no pidfd (before Linux 5.3,
+/// other systems) or no runtime to register it with.
+#[cfg(target_os = "linux")]
+fn exit_notifier(pid: Option<u32>) -> Option<impl std::future::Future<Output = ()> + Send> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+    tokio::runtime::Handle::try_current().ok()?;
+    let raw = unsafe { libc::syscall(libc::SYS_pidfd_open, pid? as libc::pid_t, 0) };
+    if raw < 0 {
+        return None;
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw as i32) };
+    // SAFETY: the `OwnedFd` is moved into the `AsyncFd`, so the descriptor
+    // stays open, and stays this pidfd, for as long as it is registered.
+    let fd = unsafe {
+        tokio::io::unix::AsyncFd::register_with_interest(fd, tokio::io::Interest::READABLE)
+    }
+    .ok()?;
+    Some(async move {
+        let _ = fd.readable().await;
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn exit_notifier(_pid: Option<u32>) -> Option<std::future::Ready<()>> {
+    None
+}
+
+/// Whether anything in process group `pgid` is still running.
+///
+/// Zombies do not count: one waiting for a parent that never reaps it — PID 1
+/// in many containers — is not running, and counting it would make every stop
+/// wait out its whole grace period.
+#[cfg(unix)]
+fn group_alive(pgid: libc::pid_t) -> bool {
+    #[cfg(target_os = "linux")]
+    if let Ok(dir) = std::fs::read_dir("/proc") {
+        return dir.flatten().any(|entry| {
+            let name = entry.file_name();
+            let Some(pid) = name
+                .to_str()
+                .filter(|n| n.bytes().all(|b| b.is_ascii_digit()))
+            else {
+                return false;
+            };
+            let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+                return false;
+            };
+            // `pid (comm) state ppid pgrp ...`; comm may hold spaces and parens.
+            let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+                return false;
+            };
+            let mut fields = rest.split_whitespace();
+            let state = fields.next();
+            let pgrp = fields.nth(1).and_then(|g| g.parse::<libc::pid_t>().ok());
+            state != Some("Z") && pgrp == Some(pgid)
+        });
+    }
+    unsafe { libc::killpg(pgid, 0) == 0 }
+}
+
+/// Blocks until `pid` has exited, leaving it a zombie for its owner to reap.
+///
+/// `WNOWAIT` is what makes this safe beside `portable_pty`'s own `try_wait`:
+/// reaping here would leave that handle unable to report the status.
+#[cfg(unix)]
+fn wait_without_reaping(pid: u32) {
+    loop {
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let r = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        };
+        if r == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
+            return;
+        }
+    }
 }
 
 /// Creates a job object holding `pid` and everything it goes on to spawn.
@@ -426,7 +565,7 @@ const SCROLLBACK_BYTES: usize = 16 * 1024;
 /// there is only one reader available anyway.
 fn pump(
     mut reader: Box<dyn Read + Send>,
-    name: &str,
+    name: &Arc<str>,
     tx: mpsc::UnboundedSender<ProcEvent>,
     raw: broadcast::Sender<Vec<u8>>,
     scrollback: Arc<Mutex<VecDeque<u8>>>,
@@ -439,27 +578,46 @@ fn pump(
             Ok(n) => n,
             Err(_) => break, // EIO on macOS when the child closes the slave: normal EOF
         };
-        // Sending fails only when nobody is attached, which is the common case.
-        let _ = raw.send(buf[..n].to_vec());
+        // Copied only for someone attached, which is the uncommon case.
+        if raw.receiver_count() > 0 {
+            let _ = raw.send(buf[..n].to_vec());
+        }
         {
             let mut back = scrollback.lock().unwrap();
             back.extend(&buf[..n]);
             let overflow = back.len().saturating_sub(SCROLLBACK_BYTES);
             back.drain(..overflow);
         }
-        for &b in &buf[..n] {
-            match b {
-                b'\n' => {
-                    emit(&mut pending, name, false, &tx);
-                }
-                b'\r' => {
-                    // Could be a lone CR (progress) or the CR of a CRLF; either way
-                    // flush now and let a following LF flush an empty line, which
-                    // `emit` drops.
-                    emit(&mut pending, name, true, &tx);
-                }
-                _ => pending.push(b),
+        let mut rest = &buf[..n];
+        while !rest.is_empty() {
+            let end = rest.iter().position(|&b| b == b'\n' || b == b'\r');
+            let (run, stop) = match end {
+                Some(i) => (&rest[..i], Some(rest[i])),
+                None => (rest, None),
+            };
+            pending.extend_from_slice(run);
+            // A line with no end in sight is cut rather than held: one `cat` of
+            // a minified bundle would otherwise sit in memory, then in the log
+            // store, whole. Cut only once strictly longer, so the byte after
+            // the cut is there to say whether it would split a character.
+            while pending.len() > MAX_LINE {
+                let cut = char_boundary(&pending, MAX_LINE);
+                let tail = pending.split_off(cut);
+                emit(&mut pending, name, false, &tx);
+                pending = tail;
             }
+            match stop {
+                Some(b'\n') => emit(&mut pending, name, false, &tx),
+                // Could be a lone CR (progress) or the CR of a CRLF; either way
+                // flush now and let a following LF flush an empty line, which
+                // `emit` drops.
+                Some(_) => emit(&mut pending, name, true, &tx),
+                None => {}
+            }
+            rest = match end {
+                Some(i) => &rest[i + 1..],
+                None => &[],
+            };
         }
     }
     if !pending.is_empty() {
@@ -467,22 +625,55 @@ fn pump(
     }
 }
 
-fn emit(pending: &mut Vec<u8>, name: &str, transient: bool, tx: &mpsc::UnboundedSender<ProcEvent>) {
+/// The longest line kept whole. Longer ones arrive as several lines.
+const MAX_LINE: usize = 64 * 1024;
+
+/// The last char boundary at or before `at`, so a cut never splits a
+/// character into two replacement marks. `at` must be inside `bytes`.
+fn char_boundary(bytes: &[u8], at: usize) -> usize {
+    let mut i = at;
+    // A continuation byte is 0b10xxxxxx; a character is at most four bytes.
+    while i > 0 && at - i < 4 && bytes[i] & 0xC0 == 0x80 {
+        i -= 1;
+    }
+    if i == 0 { at } else { i }
+}
+
+fn emit(
+    pending: &mut Vec<u8>,
+    name: &Arc<str>,
+    transient: bool,
+    tx: &mpsc::UnboundedSender<ProcEvent>,
+) {
     if pending.is_empty() {
         return;
     }
-    let text = String::from_utf8_lossy(pending).to_string();
+    // One allocation for valid UTF-8, which is nearly all output.
+    let text = match std::str::from_utf8(pending) {
+        Ok(text) => text.to_owned(),
+        Err(_) => String::from_utf8_lossy(pending).into_owned(),
+    };
     pending.clear();
     let _ = tx.send(ProcEvent::Line(LogLine {
         seq: SEQ.fetch_add(1, Ordering::Relaxed),
-        proc: name.to_string(),
+        proc: name.clone(),
         text,
         transient,
     }));
 }
 
 /// Strips ANSI escape sequences. Used for log files and for width math.
-pub fn strip_ansi(s: &str) -> String {
+///
+/// Borrowed when there is nothing to strip, which is most lines: this runs on
+/// every line of output, and copying each one was a measurable share of it.
+pub fn strip_ansi(s: &str) -> std::borrow::Cow<'_, str> {
+    if !s.contains('\u{1b}') {
+        return std::borrow::Cow::Borrowed(s);
+    }
+    std::borrow::Cow::Owned(strip_escapes(s))
+}
+
+fn strip_escapes(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
@@ -524,6 +715,78 @@ pub fn strip_ansi(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lines_of(input: Vec<u8>) -> Vec<(String, bool)> {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (raw, _) = broadcast::channel(4);
+        let back = Arc::new(Mutex::new(VecDeque::new()));
+        pump(
+            Box::new(std::io::Cursor::new(input)),
+            &"t".into(),
+            tx,
+            raw,
+            back,
+        );
+        let mut out = Vec::new();
+        while let Ok(ProcEvent::Line(l)) = rx.try_recv() {
+            out.push((l.text, l.transient));
+        }
+        out
+    }
+
+    #[test]
+    fn output_splits_on_newlines_and_carriage_returns() {
+        let got = lines_of(b"one\r\ntwo\n50%\r100%\rdone\ntail".to_vec());
+        let want = [
+            ("one", true),
+            ("two", false),
+            ("50%", true),
+            ("100%", true),
+            ("done", false),
+            ("tail", false),
+        ];
+        assert_eq!(
+            got,
+            want.iter()
+                .map(|(t, r)| (t.to_string(), *r))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn a_line_with_no_end_is_cut_not_held() {
+        let got = lines_of(vec![b'x'; MAX_LINE * 3 + 10]);
+        let lens: Vec<usize> = got.iter().map(|(t, _)| t.len()).collect();
+        assert_eq!(lens, vec![MAX_LINE, MAX_LINE, MAX_LINE, 10]);
+        let exact = lines_of(vec![b'x'; MAX_LINE * 2]);
+        assert_eq!(exact.len(), 2, "an exact multiple leaves no empty tail");
+    }
+
+    #[test]
+    fn a_cut_never_splits_a_character() {
+        // Two-byte characters straddling every cut point.
+        let mut input = vec![b'x'];
+        input.extend("é".repeat(MAX_LINE).as_bytes());
+        let got = lines_of(input);
+        for (i, (t, _)) in got.iter().enumerate() {
+            assert!(
+                !t.contains('\u{fffd}'),
+                "line {i} of {}, {} bytes, at {:?}",
+                got.len(),
+                t.len(),
+                t.find('\u{fffd}')
+            );
+        }
+        let total: usize = got.iter().map(|(t, _)| t.len()).sum();
+        assert_eq!(total, 1 + 2 * MAX_LINE);
+    }
+
+    #[test]
+    fn a_line_of_exactly_the_limit_is_one_line() {
+        let mut input = vec![b'y'; MAX_LINE];
+        input.push(b'\n');
+        assert_eq!(lines_of(input).len(), 1);
+    }
 
     /// Children run through the platform shell, so test fixtures have to be
     /// written in it. `cmd.exe` separates commands with `&`, not `;`, and has no
@@ -597,6 +860,50 @@ mod tests {
     // Unix only until someone can debug pty capture on Windows directly: both
     // of these see no child output at all there, and blind iteration against CI
     // has not found why. Everything else in the suite passes on Windows. See 0062.
+    /// The leader dying is not the group stopping: here the shell dies of the
+    /// SIGTERM at once, and the child it started takes 300ms to finish — after
+    /// the hangup the leader's exit sends it, too. `stop` used to return with
+    /// that child still running.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_returns_only_when_the_whole_group_is_gone() {
+        let dir = std::env::temp_dir().join(format!("tr-group-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = spawn(
+            "t",
+            "sh -c 'trap \"sleep 0.3; exit 0\" TERM HUP; echo $$ > child; echo ready; \
+             while :; do sleep 0.05; done' & wait",
+            &dir,
+            &Default::default(),
+            tx,
+        )
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut ready = false;
+        while !ready && tokio::time::Instant::now() < deadline {
+            if let Ok(Some(ProcEvent::Line(l))) =
+                tokio::time::timeout(Duration::from_millis(250), rx.recv()).await
+            {
+                ready = strip_ansi(&l.text).contains("ready");
+            }
+        }
+        assert!(ready, "child never started");
+        let child: libc::pid_t = std::fs::read_to_string(dir.join("child"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+
+        h.stop(Duration::from_secs(5)).await.unwrap();
+        assert!(
+            !group_alive(h.pid.unwrap() as libc::pid_t),
+            "stop returned while child {child} was still running"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn stop_kills_the_whole_process_group() {

@@ -91,7 +91,11 @@ pub struct Reporter {
     verbosity: Verbosity,
     order: Order,
     colour: bool,
-    log_file: Option<std::fs::File>,
+    log_file: Option<std::io::BufWriter<std::fs::File>>,
+    /// Where shown lines go, buffered: `println!` locks stdout and, stdout
+    /// being line-buffered, makes a system call for every line. Written out by
+    /// [`Reporter::sync`], which the event pump calls after each batch.
+    out: std::io::BufWriter<std::io::Stdout>,
     /// Buffered lines per node, for `Grouped`.
     pending: BTreeMap<String, Vec<String>>,
     /// Nodes that actually executed rather than being served from cache.
@@ -105,18 +109,20 @@ impl Reporter {
         colour: bool,
         log_file: Option<PathBuf>,
     ) -> Result<Self> {
-        let file =
-            match log_file {
-                Some(path) => Some(std::fs::File::create(&path).map_err(|e| {
+        let file = match log_file {
+            Some(path) => Some(std::io::BufWriter::new(
+                std::fs::File::create(&path).map_err(|e| {
                     anyhow::anyhow!("cannot write log file {}: {e}", path.display())
-                })?),
-                None => None,
-            };
+                })?,
+            )),
+            None => None,
+        };
         Ok(Reporter {
             verbosity,
             order,
             colour,
             log_file: file,
+            out: std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout()),
             pending: BTreeMap::new(),
             ran: std::collections::BTreeSet::new(),
         })
@@ -141,40 +147,31 @@ impl Reporter {
         if self.verbosity == Verbosity::None {
             return;
         }
-        let rendered = self.render(line);
-        match self.order {
-            Order::Stream => {
-                if self.verbosity == Verbosity::Full {
-                    println!("{rendered}");
-                }
-                // errors-only and new-only cannot be decided until the node
-                // finishes, so they buffer even when streaming.
-                else {
-                    self.pending
-                        .entry(line.proc.clone())
-                        .or_default()
-                        .push(rendered);
-                }
-            }
-            Order::Grouped => {
-                self.pending
-                    .entry(line.proc.clone())
-                    .or_default()
-                    .push(rendered);
-            }
+        // errors-only and new-only cannot be decided until the node
+        // finishes, so they buffer even when streaming.
+        if self.order == Order::Stream && self.verbosity == Verbosity::Full {
+            let _ = write_line(&mut self.out, self.colour, line);
+            return;
         }
+        let rendered = self.render(line);
+        self.pending
+            .entry(line.proc.to_string())
+            .or_default()
+            .push(rendered);
     }
 
     fn render(&self, line: &LogLine) -> String {
-        let text = if self.colour {
-            line.text.clone()
-        } else {
-            crate::proc::strip_ansi(&line.text)
-        };
-        if self.colour {
-            format!("\u{1b}[1m{:>10}\u{1b}[0m | {text}", line.proc)
-        } else {
-            format!("{:>10} | {text}", line.proc)
+        let mut out = Vec::with_capacity(line.text.len() + 16);
+        let _ = write_line(&mut out, self.colour, line);
+        out.pop(); // the newline
+        String::from_utf8(out).unwrap_or_default()
+    }
+
+    /// Writes out everything shown so far.
+    pub fn sync(&mut self) {
+        let _ = self.out.flush();
+        if let Some(f) = self.log_file.as_mut() {
+            let _ = f.flush();
         }
     }
 
@@ -191,9 +188,10 @@ impl Reporter {
         };
         if show {
             for line in lines {
-                println!("{line}");
+                let _ = writeln!(self.out, "{line}");
             }
         }
+        self.sync();
     }
 
     /// Flushes anything still buffered, at the end of a run.
@@ -204,7 +202,35 @@ impl Reporter {
             // than swallowing it.
             self.finish(&node, true);
         }
+        self.sync();
     }
+}
+
+impl Drop for Reporter {
+    fn drop(&mut self) {
+        self.sync();
+    }
+}
+
+/// One line as shown: the node's name, right-aligned in ten columns, then its
+/// text. Written piece by piece rather than through `write!`, whose general
+/// padding machinery was a third of the cost of a line of output.
+fn write_line(out: &mut impl Write, colour: bool, line: &LogLine) -> std::io::Result<()> {
+    const WIDTH: usize = 10;
+    let pad = WIDTH.saturating_sub(line.proc.chars().count());
+    if colour {
+        out.write_all(b"\x1b[1m")?;
+    }
+    out.write_all(&b"          "[..pad])?;
+    out.write_all(line.proc.as_bytes())?;
+    if colour {
+        out.write_all(b"\x1b[0m | ")?;
+        out.write_all(line.text.as_bytes())?;
+    } else {
+        out.write_all(b" | ")?;
+        out.write_all(crate::proc::strip_ansi(&line.text).as_bytes())?;
+    }
+    out.write_all(b"\n")
 }
 
 #[cfg(test)]
@@ -234,6 +260,34 @@ mod tests {
         assert!(use_colour(Colour::Always, true));
         unsafe { std::env::remove_var("NO_COLOR") };
         assert!(use_colour(Colour::Auto, true));
+    }
+
+    #[test]
+    fn a_line_is_shown_as_it_always_was() {
+        let line = |proc: &str, text: &str| LogLine {
+            seq: 1,
+            proc: proc.into(),
+            text: text.into(),
+            transient: false,
+        };
+        let shown = |colour, l: &LogLine| {
+            let mut out = Vec::new();
+            write_line(&mut out, colour, l).unwrap();
+            String::from_utf8(out).unwrap()
+        };
+        for (proc, text) in [
+            ("api", "ok"),
+            ("exactly-10", "x"),
+            ("much-longer-name", "y"),
+            ("é", "z"),
+        ] {
+            let l = line(proc, text);
+            assert_eq!(shown(false, &l), format!("{proc:>10} | {text}\n"));
+            assert_eq!(
+                shown(true, &l),
+                format!("\u{1b}[1m{proc:>10}\u{1b}[0m | {text}\n")
+            );
+        }
     }
 
     #[test]

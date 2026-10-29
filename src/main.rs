@@ -704,7 +704,7 @@ async fn cmd_run(
             started_at: started,
             duration_ms: began.elapsed().as_millis() as u64,
             exit_code: code,
-            global: plan.global.clone(),
+            global: plan.global.settled(),
             tasks: engine.outcomes(),
         };
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
@@ -733,9 +733,9 @@ async fn cmd_up(
         ),
         None => watch::Backend::Native,
     };
-    let watcher = watch::watch_with(&ws.root, Duration::from_millis(120), backend)
-        .context("starting file watcher")?;
     let plan = Arc::new(plan::resolve(&ws, &targets)?);
+    let watcher = watch::watch_with(&ws.root, plan.watch_quiet(), backend)
+        .context("starting file watcher")?;
     let cache = Arc::new(open_cache(&ws)?);
     let (engine, rx) = Engine::new_verifying(plan.clone(), cache, ws.config.cache.verify);
 
@@ -771,7 +771,7 @@ async fn cmd_up(
                 }
                 let _ = ev.send(turborust::proc::ProcEvent::Line(turborust::proc::LogLine {
                     seq: turborust::proc::next_seq(),
-                    proc: name.clone(),
+                    proc: name.as_str().into(),
                     text: format!("\u{1b}[2mwaiting for {} to exist…\u{1b}[0m", dir.display()),
                     transient: true,
                 }));
@@ -793,7 +793,7 @@ async fn cmd_up(
             if let Err(e) = serve::serve(opts).await {
                 let _ = ev.send(turborust::proc::ProcEvent::Line(turborust::proc::LogLine {
                     seq: turborust::proc::next_seq(),
-                    proc: name.clone(),
+                    proc: name.as_str().into(),
                     text: format!("serve failed: {e}"),
                     transient: false,
                 }));

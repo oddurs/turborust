@@ -514,7 +514,7 @@
         "debounce": {
           "description": "Debounce window for watch events before acting.",
           "type": "string",
-          "default": "120ms"
+          "default": "50ms"
         },
         "depends_on": {
           "type": "array",

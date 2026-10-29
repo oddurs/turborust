@@ -43,6 +43,20 @@ pub struct ProbeRequest<'a> {
 pub trait Child: Send + Sync {
     fn pid(&self) -> Option<u32>;
     fn try_exit_code(&self) -> Option<i32>;
+    /// Resolves with the exit code once the child has exited.
+    ///
+    /// Polls by default, which is free under a paused clock; a real child
+    /// overrides it with a notification.
+    fn exited(&self) -> BoxFuture<'_, i32> {
+        Box::pin(async move {
+            loop {
+                if let Some(code) = self.try_exit_code() {
+                    return code;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+    }
     /// Ends the child and everything it started, giving it `grace` first.
     fn stop(&self, grace: Duration) -> BoxFuture<'_, ()>;
     /// Ends the child and everything it started, now.
@@ -68,6 +82,9 @@ impl Child for Handle {
     }
     fn try_exit_code(&self) -> Option<i32> {
         Handle::try_exit_code(self)
+    }
+    fn exited(&self) -> BoxFuture<'_, i32> {
+        Box::pin(Handle::exited(self))
     }
     fn stop(&self, grace: Duration) -> BoxFuture<'_, ()> {
         Box::pin(async move {

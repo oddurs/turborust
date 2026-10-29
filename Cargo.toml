@@ -61,7 +61,6 @@ hyper-util = { version = "0.1.20", features = ["client", "client-legacy", "http1
 ignore = "0.4.33"
 libc = "0.2.189"
 notify = "8.2.0"
-notify-debouncer-full = "0.7.0"
 notify-rust = "4.18.0"
 portable-pty = "0.9.0"
 ratatui = "0.30.2"
@@ -69,7 +68,7 @@ rustls = { optional = true, version = "0.23.44", default-features = false, featu
 schemars = "1.2.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-tokio = { version = "1.53.1", features = ["full"] }
+tokio = { version = "1.54.1", features = ["full"] }
 tokio-stream = { version = "0.1.19", features = ["sync", "time"] }
 toml = "1.1.5"
 tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
@@ -78,4 +77,4 @@ tower-http = { version = "0.7.1", features = ["fs", "set-header"] }
 # moves only when every task is waiting (cairn 0106). Dev only: the shipped
 # binary is built without it.
 [dev-dependencies]
-tokio = { version = "1.53.1", features = ["full", "test-util"] }
+tokio = { version = "1.54.1", features = ["full", "test-util"] }

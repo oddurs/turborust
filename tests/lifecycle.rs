@@ -456,6 +456,31 @@ fn crash_backoff_doubles_and_is_capped() {
     );
 }
 
+/// A crash after a long, quiet run is a new problem, not the next round of an
+/// old loop. For a service with no probe nothing else resets the backoff, so a
+/// service that crashed once a day waited longer every day, up to the cap.
+#[test]
+fn a_long_run_before_a_crash_resets_the_backoff() {
+    let mut t = Clock::new();
+    let mut m = Service::new(cfg());
+    running(&mut m, &none(), &t);
+    for _ in 0..4 {
+        let acts = m.on(Event::Exited(1), &none(), t.now());
+        let Some(Status::Backoff(d)) = status(&acts) else {
+            panic!("expected a backoff, got {acts:?}");
+        };
+        t.advance(d);
+        m.on(Event::Timer(Timer::Backoff), &none(), t.now());
+        respawn(&mut m, &none(), &t);
+    }
+    // Up longer than `backoff_max`, the line between a loop and a new crash.
+    t.advance(ms(1000) + ms(1));
+    assert_eq!(
+        status(&m.on(Event::Exited(1), &none(), t.now())),
+        Some(Status::Backoff(ms(100)))
+    );
+}
+
 #[test]
 fn a_stop_or_a_change_cuts_a_backoff_short() {
     let t = Clock::new();
