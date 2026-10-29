@@ -2,7 +2,7 @@
 id: 95
 title: A task that hangs hangs the run
 type: feature
-status: backlog
+status: done
 created: 2026-10-28
 updated: 2026-10-28
 priority: p2
@@ -30,6 +30,30 @@ rest of the graph carries on. Durations are bounded as `0086` bounds them.
 
 ## Acceptance criteria
 
-- [ ] A task over its `timeout` is stopped, tree and all, and fails saying why
-- [ ] The run's exit code distinguishes a timeout from a failure
-- [ ] `--continue` keeps unrelated work going after a timeout
+- [x] A task over its `timeout` is stopped, tree and all, and fails saying why
+- [x] The run's exit code distinguishes a timeout from a failure
+- [x] `--continue` keeps unrelated work going after a timeout
+
+## 2026-10-29
+
+`timeout = "10m"` per task, `[project] task_timeout` as the default; a task's
+own wins. Parsed at plan time, bounded as `0086` bounds durations, and zero is
+refused (it would fail every task before it started).
+
+At the limit the task is stopped the way a shutdown stops it (`0085`): the
+process group gets `SIGTERM`, then a kill after the grace period, so a test
+binary under `cargo test` goes too, not just the shell. It fails with
+"timed out after 10m; stopped" and code 124, which is what GNU `timeout(1)`
+exits with, so CI scripts that already check for it read it right.
+
+Found while writing it: telling a timeout by its code is wrong, since a command
+can exit 124 itself. The first draft did, and such a task would never have been marked
+failed, so `run` waited on it forever. `wait_limited` now returns a flag beside
+the code; `a_command_that_exits_124_itself_is_an_ordinary_failure` is the cover.
+
+`alive()` in the test reads `/proc/<pid>/stat` and treats a zombie as gone: an
+orphaned grandchild is reaped by whatever PID 1 is, and in a container that may
+be nothing.
+
+Mutation-checked: not stopping the tree, deciding by the code, and ignoring the
+limit each fail a test.
