@@ -42,13 +42,21 @@ impl Sandbox {
         let dir = std::env::temp_dir().join(format!("turborust-run-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Sandbox {
-            dir: dir.canonicalize().unwrap(),
-        }
+        let dir = dir.canonicalize().unwrap();
+        // Fixtures put these paths inside TOML strings and shell commands.
+        // Forward slashes and no `\\?\` prefix mean the same to Git Bash and
+        // need no escaping in either.
+        #[cfg(windows)]
+        let dir = PathBuf::from(
+            dir.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .replace('\\', "/"),
+        );
+        Sandbox { dir }
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
+        PathBuf::from(format!("{}/{name}", self.dir.display()))
     }
 }
 
