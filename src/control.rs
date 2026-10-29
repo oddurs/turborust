@@ -147,6 +147,9 @@ pub enum Request {
         limit: usize,
         protocol: u32,
     },
+    /// The whole board as the overlay sees it: `contract::Output::State`
+    /// (cairn 0077).
+    State { protocol: u32 },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -156,6 +159,10 @@ pub struct Response {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub history: Option<Vec<crate::state::HistoryRecord>>,
+    /// A `Snapshot`, as JSON: it is only ever serialised, and a client wants
+    /// the payload the schema describes, not the type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<serde_json::Value>,
 }
 
 impl Response {
@@ -164,6 +171,7 @@ impl Response {
             ok: true,
             error: None,
             history: None,
+            state: None,
         }
     }
     fn err(msg: impl Into<String>) -> Self {
@@ -171,6 +179,7 @@ impl Response {
             ok: false,
             error: Some(msg.into()),
             history: None,
+            state: None,
         }
     }
 }
@@ -331,7 +340,31 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
             });
             write_line(&mut stream, &reply).await
         }
+        Request::State { protocol } => {
+            let reply = version_mismatch(protocol).unwrap_or_else(|| {
+                let snapshot = engine.state.lock().unwrap().snapshot();
+                Response {
+                    state: serde_json::to_value(snapshot).ok(),
+                    ..Response::ok()
+                }
+            });
+            write_line(&mut stream, &reply).await
+        }
     }
+}
+
+/// The board of the `turborust up` running here, or `None` when none is.
+pub async fn state(cache_dir: &Path) -> Result<Option<serde_json::Value>> {
+    let Ok(mut stream) = transport::connect(&socket_path(cache_dir)).await else {
+        return Ok(None);
+    };
+    write_line(&mut stream, &Request::State { protocol: PROTOCOL }).await?;
+    let response: Response = serde_json::from_str(&read_line(&mut stream).await?)
+        .context("the server sent something unparseable")?;
+    if !response.ok {
+        bail!("{}", response.error.unwrap_or_else(|| "refused".into()));
+    }
+    Ok(response.state)
 }
 
 /// The newest history entries from the `turborust up` running here, or `None`
