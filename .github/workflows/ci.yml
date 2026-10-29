@@ -109,7 +109,7 @@ jobs:
       - run: git diff --exit-code turborust.schema.json
 
   roadmap:
-    name: roadmap is in sync
+    name: roadmap validates
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -123,6 +123,17 @@ jobs:
       # names a missing changeset: a nudge, never a gate.
       - name: tracker matches the work
         run: scripts/audit ${{ github.event_name == 'pull_request' && format('--branch {0}', github.event.pull_request.base.sha) || '' }}
+      # ROADMAP.md is rendered on main after each merge (roadmap.yml), not in
+      # pull requests: two branches that each close an item both rewrite the
+      # same progress line, so carrying the render in the branch made every
+      # pull request wait for the one before it (cairn 0108).
+      - name: the roadmap is left to main
+        if: github.event_name == 'pull_request'
+        run: |
+          if git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" | grep -qx ROADMAP.md; then
+            echo "::error file=ROADMAP.md::ROADMAP.md is rendered on main after merge; drop it from this branch (git checkout origin/main -- ROADMAP.md)"
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@stable
       # The package is `cairn-md`, from its own repository. `cargo install cairn`
       # resolves to an unrelated crate on crates.io that does not compile, and
@@ -134,10 +145,5 @@ jobs:
       # `render` never take the write lock that asks for `cairn migrate`.
       - name: install cairn
         run: cargo install --locked --git https://github.com/oddurs/cairn --tag v0.3.0 cairn-md
-      # A roadmap that has drifted from its items is the rot cairn exists to
-      # prevent, so the check belongs in CI rather than in discipline.
-      - name: roadmap validates and is up to date
-        run: |
-          cairn check
-          cairn render
-          git diff --exit-code ROADMAP.md
+      - name: items validate
+        run: cairn check

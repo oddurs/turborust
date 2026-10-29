@@ -43,6 +43,10 @@ same commands if you prefer.
 Work is tracked with `cairn` as Markdown files in `cairn/items`, rendered to
 [ROADMAP.md](ROADMAP.md). `cairn next` shows what is ready to start.
 
+Change the items, never `ROADMAP.md`: a workflow renders it on `main` after each
+merge, and a pull request that edits it fails CI. Carrying the render in each
+branch is what used to make two pull requests that close items conflict.
+
 Before proposing something turborust appears to be missing, check
 `cairn search <topic> --all`: five capabilities comparable tools ship were
 considered and declined, each with its reasoning. `search` hides dropped items

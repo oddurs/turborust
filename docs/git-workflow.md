@@ -26,7 +26,7 @@ scripts/agent new bug "title"     # file a tracker item and branch for it
 scripts/agent start 0041          # or take one that already exists
 cd ../.worktrees/turborust/fix-0041-...
                                   # do the work
-scripts/agent check               # formatter, linter, tests, roadmap, tracker
+scripts/agent check               # formatter, linter, tests, items, tracker
 scripts/agent commit "fix(proc): start the pty reader before the child"
 scripts/agent pr                  # push, open a PR from the tracker item
 scripts/agent clean               # once merged, remove the worktree
@@ -111,7 +111,7 @@ warnings fail too, for anyone who wants that locally.
 | Hook | Runs | Rejects |
 |---|---|---|
 | `commit-msg` | every commit | attribution footers, non-conventional subjects, subjects over 72 chars |
-| `pre-commit` | every commit | unformatted code, an invalid roadmap; re-renders `ROADMAP.md` |
+| `pre-commit` | every commit | unformatted code, items that do not validate |
 | `pre-push` | every push | clippy warnings, failing tests |
 
 Fast checks on commit, slow ones on push: a hook that makes committing feel

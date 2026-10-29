@@ -27,7 +27,7 @@ cairn set <ID> status=<STATUS>    # also labels+=x, or any field below
 cairn note <ID> "<TEXT>"          # append reasoning; never replaces
 cairn close <ID>
 cairn check                       # validate; run before finishing
-cairn render                      # regenerate ROADMAP.md
+cairn render                      # preview ROADMAP.md locally (do not commit it)
 ```
 
 ### Schema
@@ -47,7 +47,7 @@ cairn render                      # regenerate ROADMAP.md
 
 1. Before starting work, find or create the item and set it to an active status.
 2. Use the fields above rather than inventing new ones; add new fields to `cairn.toml` first.
-3. Never hand-edit the generated roadmap file — change items and run `cairn render`.
+3. Never hand-edit the generated roadmap file — change items; `main` re-renders it after merge.
 4. `cairn check` must pass before the work is considered done.
 
 
@@ -62,7 +62,10 @@ cairn render                      # regenerate ROADMAP.md
   second bug, note it on the item rather than only fixing it — several bugs here
   were found that way.
 - `cargo fmt`, `cargo clippy --all-targets` and `cairn check` must all be clean;
-  CI enforces all three plus a rendered-roadmap-is-in-sync check.
+  CI enforces all three.
+- `ROADMAP.md` is rendered on `main` by a workflow after each merge. Do not
+  render or commit it in a branch: CI rejects a pull request that edits it,
+  because two branches that each close an item would otherwise conflict on it.
 
 
 ### Git workflow

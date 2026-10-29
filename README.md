@@ -508,8 +508,9 @@ Design constraints worth knowing about:
 
 ## Roadmap
 
-Tracked with `cairn` as Markdown files under `cairn/items`, rendered to
-[ROADMAP.md](ROADMAP.md) — reviewable in a pull request like anything else.
+Tracked with `cairn` as Markdown files under `cairn/items`, which are reviewed
+in pull requests like anything else, and rendered to [ROADMAP.md](ROADMAP.md) on
+`main` after each merge.
 
 - **v0.0** — what already exists, recorded after the fact, including the bugs
   found while building it
