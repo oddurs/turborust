@@ -123,15 +123,14 @@ jobs:
       # names a missing changeset: a nudge, never a gate.
       - name: tracker matches the work
         run: scripts/audit ${{ github.event_name == 'pull_request' && format('--branch {0}', github.event.pull_request.base.sha) || '' }}
-      # ROADMAP.md is rendered on main after each merge (roadmap.yml), not in
-      # pull requests: two branches that each close an item both rewrite the
-      # same progress line, so carrying the render in the branch made every
-      # pull request wait for the one before it (cairn 0108).
-      - name: the roadmap is left to main
-        if: github.event_name == 'pull_request'
+      # ROADMAP.md is rendered after each merge and published on the `roadmap`
+      # branch (roadmap.yml); it is not tracked on main. A render carried in
+      # pull requests made every two that close items conflict (cairn 0108),
+      # and main cannot take the bot's commit directly (0109).
+      - name: the roadmap stays off main
         run: |
-          if git diff --name-only "${{ github.event.pull_request.base.sha }}...HEAD" | grep -qx ROADMAP.md; then
-            echo "::error file=ROADMAP.md::ROADMAP.md is rendered on main after merge; drop it from this branch (git checkout origin/main -- ROADMAP.md)"
+          if git ls-files --error-unmatch ROADMAP.md >/dev/null 2>&1; then
+            echo "::error file=ROADMAP.md::ROADMAP.md is published on the roadmap branch, not tracked here: git rm --cached ROADMAP.md"
             exit 1
           fi
       - uses: dtolnay/rust-toolchain@stable

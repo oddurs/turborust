@@ -26,3 +26,7 @@ the file too, so the conflict reached every branch that touched an item.
 - [x] Pull requests no longer render it, and fail if they edit it
 - [x] The pre-commit hook validates items but no longer regenerates the file
 - [x] AGENTS.md, CONTRIBUTING.md and the git-workflow doc say how it works now
+
+Its first run after merge could not push: `main` is protected and takes changes
+only through pull requests with passing checks. The render now publishes to a
+`roadmap` branch instead; see `0109`.

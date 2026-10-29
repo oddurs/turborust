@@ -41,11 +41,12 @@ same commands if you prefer.
 ## The roadmap
 
 Work is tracked with `cairn` as Markdown files in `cairn/items`, rendered to
-[ROADMAP.md](ROADMAP.md). `cairn next` shows what is ready to start.
+[ROADMAP.md](https://github.com/oddurs/turborust/blob/roadmap/ROADMAP.md). `cairn next` shows what is ready to start.
 
-Change the items, never `ROADMAP.md`: a workflow renders it on `main` after each
-merge, and a pull request that edits it fails CI. Carrying the render in each
-branch is what used to make two pull requests that close items conflict.
+Change the items; the roadmap follows. A workflow renders it after each merge and
+publishes it on the `roadmap` branch, so it is not tracked on `main` and a local
+`cairn render` is only a preview. Carrying the render in each branch is what used
+to make two pull requests that close items conflict.
 
 Before proposing something turborust appears to be missing, check
 `cairn search <topic> --all`: five capabilities comparable tools ship were
