@@ -150,8 +150,10 @@ cmd_new() {
     if [ -n "$item" ] && [ -n "$dir" ] && [ -d "$dir" ]; then
         mkdir -p "$dir/cairn/items"
         mv "$repo_root/$item" "$dir/$item"
+        # `cairn new` may have re-rendered the main checkout's roadmap; put it
+        # back. The branch does not render it either: ROADMAP.md is rendered on
+        # main after merge, and a pull request that edits it fails CI (0108).
         (cd "$repo_root" && git checkout --quiet -- ROADMAP.md 2>/dev/null) || true
-        (cd "$dir" && CAIRN_NO_HOOKS=1 cairn render -q >/dev/null 2>&1) || true
         dim "  $item moved onto the branch"
     fi
 }
