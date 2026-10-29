@@ -55,6 +55,15 @@ build-provenance attestation, shell completions and a man page — see
 [SECURITY.md](SECURITY.md#verifying-a-release) for checking them. From the first
 release on, `cargo install turborust` works as well.
 
+Completions for bash, zsh and fish also complete node names from the nearest
+`turborust.toml` after `up`, `run`, `why`, `connect`, `verify` and `--filter`:
+
+```
+turborust completions bash > ~/.local/share/bash-completion/completions/turborust
+turborust completions zsh  > "${fpath[1]}/_turborust"
+turborust completions fish > ~/.config/fish/completions/turborust.fish
+```
+
 ## Commands
 
 ```

@@ -1,6 +1,7 @@
 pub mod affected;
 pub mod cache;
 pub mod cargo;
+pub mod complete;
 pub mod config;
 pub mod contract;
 pub mod control;
