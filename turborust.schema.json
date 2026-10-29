@@ -323,6 +323,17 @@
             "null"
           ]
         },
+        "shell": {
+          "description": "The shell every command runs through, unless a node sets its own. A\nname (`\"bash\"`, `\"pwsh\"`) or an exact argv the command is appended to\n(`[\"bash\", \"-eu\", \"-c\"]`). Default: `/bin/sh -c`, and `cmd /C` on\nWindows.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "task_timeout": {
           "description": "The longest any task may run, unless it sets its own `timeout`.",
           "type": [
@@ -646,6 +657,17 @@
             }
           ]
         },
+        "shell": {
+          "description": "The shell this node's command runs through; see `[project] shell`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "signal": {
           "description": "Signal sent when `on_change = \"signal\"`, e.g. \"SIGHUP\".",
           "type": [
@@ -704,6 +726,20 @@
         }
       },
       "additionalProperties": false
+    },
+    "ShellSpec": {
+      "description": "A shell, by name or as an exact argv (cairn 0062).",
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      ]
     },
     "TargetDir": {
       "description": "Where a node's cargo builds put their artifacts.\n\ncargo takes an exclusive lock on its target directory, so two nodes building\nat once serialise. Splitting removes the contention and is a clear win when\nthe two builds share nothing anyway — a wasm frontend and a native backend\ncompile for different targets. It is usually a loss for two native binaries\nin one workspace, because every shared dependency is then compiled twice and\nstored twice.",
@@ -818,6 +854,17 @@
           "items": {
             "type": "string"
           }
+        },
+        "shell": {
+          "description": "The shell this node's command runs through; see `[project] shell`.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ShellSpec"
+            },
+            {
+              "type": "null"
+            }
+          ]
         },
         "target_dir": {
           "$ref": "#/$defs/TargetDir"

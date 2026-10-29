@@ -318,6 +318,7 @@ impl Engine {
         self.host.spawn(SpawnRequest {
             name,
             cmd,
+            shell: node.shell.as_deref(),
             cwd: &node.cwd,
             env,
             isolated: node.env_mode == EnvMode::Strict,
@@ -476,6 +477,11 @@ impl Engine {
 
         let mut meta = BTreeMap::new();
         meta.insert("cmd".to_string(), self.command_for(node));
+        // Only when set, so every key from before shells were configurable
+        // still hits: the same text means something else under another shell.
+        if let Some(shell) = &node.shell {
+            meta.insert("shell".to_string(), shell.join("\u{1f}"));
+        }
         meta.insert(
             "cwd".to_string(),
             node.cwd
@@ -2020,6 +2026,28 @@ mod env_tests {
         assert_eq!(
             a.hash, b.hash,
             "pass_through_env is the explicit escape hatch"
+        );
+    }
+
+    #[test]
+    fn a_shell_keys_the_task_only_when_one_is_set() {
+        let key = |src: &str| {
+            let e = engine_for(src, "build");
+            let node = e.plan.get("build").unwrap();
+            let fp = e.fingerprint(node).unwrap();
+            (fp.hash.clone(), fp.meta.contains_key("shell"))
+        };
+        let base = cfg("TR_T9_D", "TR_T9_P");
+        let (plain, keyed) = key(&base);
+        assert!(
+            !keyed,
+            "no shell, no `shell` in the key: old keys still hit"
+        );
+        let (bash, keyed) = key(&format!("{base}\nshell = \"bash\""));
+        assert!(keyed);
+        assert_ne!(
+            plain, bash,
+            "the same text means something else under another shell"
         );
     }
 

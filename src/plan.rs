@@ -50,6 +50,8 @@ pub struct Node {
     pub on_change: OnChange,
     /// Parsed signal number for `on_change = "signal"`.
     pub signal: Option<i32>,
+    /// The shell argv the command is appended to; `None` for the platform's.
+    pub shell: Option<Vec<String>>,
     pub reload: Reload,
     /// Output marking the start of a rebuild, for `reload = "self"`.
     pub reloading: Option<String>,
@@ -233,6 +235,16 @@ impl Plan {
     }
 }
 
+/// The node's shell, else the project's, else none (the platform default).
+fn shell_for(
+    ws: &Workspace,
+    own: Option<&crate::config::ShellSpec>,
+) -> Result<Option<Vec<String>>> {
+    own.or(ws.config.project.shell.as_ref())
+        .map(|s| s.argv())
+        .transpose()
+}
+
 /// The project's env files and then the node's, loaded once here so a missing
 /// or malformed file is refused before anything runs.
 fn env_files(
@@ -408,6 +420,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             restart: s.restart,
             on_change: s.on_change,
             signal: s.signal.as_deref().map(parse_signal).transpose()?,
+            shell: shell_for(ws, s.shell.as_ref())?,
             reload: s.reload,
             reloading: s.reloading.as_ref().map(|r| r.log.clone()),
             reload_failed: s.reloading.as_ref().and_then(|r| r.failed.clone()),
@@ -507,6 +520,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         restart: RestartPolicy::Never,
         on_change: OnChange::Restart,
         signal: None,
+        shell: shell_for(ws, t.shell.as_ref())?,
         reload: Reload::Restart,
         reloading: None,
         reload_failed: None,
