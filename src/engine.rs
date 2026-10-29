@@ -64,6 +64,9 @@ pub struct Engine {
     notifier: Mutex<crate::notify::Notifier>,
     /// Per-task outcomes for this run, in completion order.
     outcomes: Mutex<Vec<crate::summary::TaskOutcomeRecord>>,
+    /// Paths that matched each node's globs since it last ran, handed to its
+    /// next process as `TURBORUST_CHANGED`.
+    changed: Mutex<BTreeMap<String, std::collections::BTreeSet<String>>>,
     /// How much of the cache to check against reality, and how many hits have
     /// gone by since the last check.
     verify: crate::config::VerifyMode,
@@ -140,6 +143,7 @@ impl Engine {
             attached: Mutex::new(std::collections::BTreeSet::new()),
             slots: Arc::new(tokio::sync::Semaphore::new(concurrency)),
             outcomes: Mutex::new(Vec::new()),
+            changed: Mutex::new(BTreeMap::new()),
             notifier: Mutex::new(crate::notify::Notifier::new(plan_notify)),
         });
         (engine, events_rx)
@@ -216,6 +220,36 @@ impl Engine {
         };
         self.forget_handle(name);
         outcome
+    }
+
+    /// Records paths that matched `name`'s globs, for its next run.
+    pub fn note_changed(&self, name: &str, paths: impl IntoIterator<Item = String>) {
+        self.changed
+            .lock()
+            .unwrap()
+            .entry(name.to_string())
+            .or_default()
+            .extend(paths);
+    }
+
+    /// The paths since `name` last ran, newline-separated, and forgets them —
+    /// so a run that was not caused by a change sees an empty value.
+    fn take_changed(&self, name: &str) -> String {
+        self.changed
+            .lock()
+            .unwrap()
+            .remove(name)
+            .map(|set| set.into_iter().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default()
+    }
+
+    /// The child environment plus `TURBORUST_CHANGED`. Separate from
+    /// `child_env` on purpose: probes and the cache key must not see it — it
+    /// says why a node runs, not what it runs on.
+    fn spawn_env(&self, node: &Node, changed: String) -> Result<BTreeMap<String, String>> {
+        let mut env = self.child_env(node)?;
+        env.insert("TURBORUST_CHANGED".into(), changed);
+        Ok(env)
     }
 
     /// The running child for `name`, if there is one.
@@ -623,6 +657,9 @@ impl Engine {
     pub async fn run_task(&self, name: &str, force: bool) -> Result<TaskOutcome> {
         let node = self.plan.get(name)?.clone();
         let start = Instant::now();
+        // Taken now, hit or miss: left behind on a cache hit, it would be handed
+        // to some later run that no change caused.
+        let changed_paths = self.take_changed(name);
 
         let fp = if node.inputs.is_empty() {
             None
@@ -749,7 +786,7 @@ impl Engine {
             name,
             &cmd,
             &node.cwd,
-            &self.child_env(&node)?,
+            &self.spawn_env(&node, changed_paths)?,
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
@@ -1201,16 +1238,18 @@ async fn supervise(
         // from deadlocking.
         let slot = engine.acquire_slot(&name).await;
         engine.set(&name, Status::Starting);
-        let spawned = engine.child_env(&node).and_then(|child_env| {
-            proc::spawn_with(
-                &name,
-                &cmd,
-                &node.cwd,
-                &child_env,
-                node.env_mode == EnvMode::Strict,
-                engine.events_tx.clone(),
-            )
-        });
+        let spawned = engine
+            .spawn_env(&node, engine.take_changed(&name))
+            .and_then(|child_env| {
+                proc::spawn_with(
+                    &name,
+                    &cmd,
+                    &node.cwd,
+                    &child_env,
+                    node.env_mode == EnvMode::Strict,
+                    engine.events_tx.clone(),
+                )
+            });
         let handle = match spawned {
             Ok(h) => h,
             Err(e) => {
@@ -2074,6 +2113,7 @@ pub fn spawn_watch_dispatch(
             for (name, matcher) in &matchers {
                 let files = crate::watch::matching(&paths, matcher);
                 let Some(first) = files.first() else { continue };
+                engine.note_changed(name, files.iter().cloned());
                 reasons.insert(
                     name.clone(),
                     if files.len() == 1 {
@@ -2237,6 +2277,25 @@ mod env_tests {
             "a changed env file value must change the key"
         );
         assert!(after.meta.contains_key("env_file:TOKEN"));
+    }
+
+    #[test]
+    fn the_changed_paths_never_reach_a_cache_key() {
+        // Cover for cairn 0098: TURBORUST_CHANGED says why a task ran, not what
+        // it ran on, so the same inputs must give the same key either way.
+        let src =
+            "[tasks.build]\ncmd = \"true\"\ninputs = [\"x\"]\nenv_keys = [\"TURBORUST_CHANGED\"]";
+        let e = engine_in("changed-key", &[("x", "")], src, "build");
+        let node = e.plan.get("build").unwrap().clone();
+        let before = e.fingerprint(&node).unwrap();
+        e.note_changed("build", ["x".to_string()]);
+        assert_eq!(e.fingerprint(&node).unwrap().hash, before.hash);
+        let env = e.spawn_env(&node, e.take_changed("build")).unwrap();
+        assert_eq!(env["TURBORUST_CHANGED"], "x");
+        assert!(
+            e.take_changed("build").is_empty(),
+            "taking the paths forgets them"
+        );
     }
 
     #[test]

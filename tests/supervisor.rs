@@ -1443,3 +1443,55 @@ async fn without_max_restarts_a_crash_loop_keeps_trying() {
     assert!(!h.reason("api").contains("gave up"));
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_restarted_node_is_told_which_of_its_files_changed() {
+    // Cover for cairn 0098. `docs/` is outside api's globs, so it must not be
+    // passed on even though it changed in the same batch.
+    let mut h = Harness::start(
+        "changed",
+        r#"
+        [tasks.check]
+        cmd = "echo \"[$TURBORUST_CHANGED]\" >> check-saw"
+        inputs = ["src/**"]
+
+        [services.api]
+        cmd = "echo \"[$TURBORUST_CHANGED]\" >> api-saw; sleep 30"
+        depends_on = ["check"]
+        watch = ["src/**"]
+        debounce = "60ms"
+        "#,
+        &["api"],
+    )
+    .seed("src")
+    .seed("docs")
+    .with_watcher();
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let saw = |f: &str| std::fs::read_to_string(h.path(f)).unwrap_or_default();
+    h.wait_for("api's first start", |_| saw("api-saw").lines().count() >= 1)
+        .await;
+    assert_eq!(
+        saw("api-saw"),
+        "[]\n",
+        "a first start was caused by no change"
+    );
+
+    let before = h.restarts("api");
+    std::fs::write(h.path("docs/notes.md"), "x").unwrap();
+    std::fs::write(h.path("src/a.rs"), "// one").unwrap();
+    h.wait_for("the restart", |st| st.nodes["api"].restarts > before)
+        .await;
+    h.wait_for("api's second start", |_| {
+        saw("api-saw").lines().count() >= 2
+    })
+    .await;
+    // The task matched too, and reran in the cascade with the same news.
+    for f in ["check-saw", "api-saw"] {
+        let last = saw(f).lines().last().unwrap_or_default().to_string();
+        assert_eq!(last, "[src/a.rs]", "{f}: {}", saw(f));
+    }
+    h.shutdown().await;
+}
