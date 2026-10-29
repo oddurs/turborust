@@ -83,6 +83,9 @@ Field names are not all cased the same way: `cache`, `verify`, `history` and
 `error` use camelCase, the rest snake_case. Renaming them would break the very
 consumers this contract is for, so they stay as they shipped.
 
+`turborust mcp` returns these same payloads as its tools' `structuredContent`,
+and declares their schemas as each tool's `outputSchema`.
+
 The control socket under `.turborust/` is not part of this contract. It is how
 `connect` and `why` reach a running `up`, versioned by its own handshake, and
 may change in any release.

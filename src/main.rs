@@ -151,6 +151,16 @@ enum Cmd {
     },
     /// Print the man page, in roff.
     Man,
+    /// Serve the Model Context Protocol on stdin and stdout, for an agent.
+    ///
+    /// Read-only unless --allow-run: the state and history of a running `up`,
+    /// and what a run would do. Every answer is a documented JSON payload
+    /// (`turborust schema --json <output>`).
+    Mcp {
+        /// Also offer `run`, which executes tasks.
+        #[arg(long)]
+        allow_run: bool,
+    },
     /// Node names in the nearest config, one per line, for shell completion.
     /// Prints nothing on any error.
     #[command(name = "__nodes", hide = true)]
@@ -257,6 +267,16 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         }
         Cmd::Schema { json: Some(output) } => {
             println!("{}", serde_json::to_string_pretty(&output.schema())?);
+            Ok(0)
+        }
+        Cmd::Mcp { allow_run } => {
+            let server = turborust::mcp::Server {
+                config: cli.config.clone(),
+                allow_run,
+                exe: std::env::current_exe()?,
+            };
+            let rt = tokio::runtime::Handle::current();
+            tokio::task::spawn_blocking(move || turborust::mcp::serve(server, rt)).await??;
             Ok(0)
         }
         Cmd::Man => {
