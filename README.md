@@ -500,6 +500,18 @@ Design constraints worth knowing about:
   ```
   ~ [dep:gen]  outputs b3:350324e4 -> outputs b3:f0356a38
   ```
+- **Supervision decides in one place and acts in another.** Each node's
+  lifecycle is a pure state machine (`src/lifecycle.rs`): an event — a child
+  exited, a probe answered, a timer fired, a dependency changed — goes in, and the
+  actions to take come out. A thin executor does them and reports back. Every
+  decision is tested by driving the machine through exact event sequences, in
+  microseconds and without a single process; the integration suite proves the
+  executor carries them out.
+- **Dependencies are read, not told.** A node's readiness is a function of its
+  status, which one function writes. Dependents wake on any change and compare
+  their dependencies' status and generation against what they started with — so
+  a dependency that rebuilt too fast to be seen leaving ready still moved its
+  generation, and its dependents still restart.
 - **Cascade dispatch.** When one edit matches several nodes, only the upstream-most
   are signalled; dependents come back through the readiness cascade instead of
   restarting twice.
