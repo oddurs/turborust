@@ -50,6 +50,10 @@ pub struct Project {
     pub watch: Option<WatchConfig>,
     /// The longest any task may run, unless it sets its own `timeout`.
     pub task_timeout: Option<String>,
+    /// Log each task run under `.turborust/` for `turborust doctor --profile`.
+    /// Local only, never sent anywhere. Default on; `TURBORUST_PROFILE=off`
+    /// also turns it off.
+    pub profile: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Default)]
@@ -75,6 +79,7 @@ impl Default for Project {
             env_file: None,
             watch: None,
             task_timeout: None,
+            profile: None,
         }
     }
 }
@@ -1172,7 +1177,8 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         "s" => n * 1_000.0,
         "m" => n * 60_000.0,
         "h" => n * 3_600_000.0,
-        other => bail!("unknown duration unit `{other}` in `{s}` (use ms, s, m, h)"),
+        "d" => n * 86_400_000.0,
+        other => bail!("unknown duration unit `{other}` in `{s}` (use ms, s, m, h, d)"),
     };
     // Refused rather than clamped. `-5s` used to become zero and `inf` or a huge
     // number saturated, and every deadline is `now + duration`: on platforms
