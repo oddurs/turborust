@@ -281,7 +281,7 @@ pub fn spawn(
     env: &std::collections::BTreeMap<String, String>,
     events: mpsc::UnboundedSender<ProcEvent>,
 ) -> Result<Handle> {
-    spawn_with(name, cmd, cwd, env, false, events)
+    spawn_with(name, cmd, None, cwd, env, false, events)
 }
 
 const NEXTEST_PROGRESS: &str = "NEXTEST_SHOW_PROGRESS";
@@ -295,6 +295,7 @@ const NEXTEST_PROGRESS: &str = "NEXTEST_SHOW_PROGRESS";
 pub fn spawn_with(
     name: &str,
     cmd: &str,
+    shell: Option<&[String]>,
     cwd: &Path,
     env: &std::collections::BTreeMap<String, String>,
     isolated: bool,
@@ -317,7 +318,14 @@ pub fn spawn_with(
         })
         .context("allocating pty")?;
 
-    let mut builder = if cfg!(windows) {
+    let mut builder = if let Some([program, args @ ..]) = shell {
+        let mut b = CommandBuilder::new(program);
+        for a in args {
+            b.arg(a);
+        }
+        b.arg(cmd);
+        b
+    } else if cfg!(windows) {
         let mut b = CommandBuilder::new("cmd");
         b.arg("/C");
         b.arg(cmd);
@@ -1204,6 +1212,38 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}]0;title\u{7}body"), "body");
     }
 
+    /// A configured shell is an argv the command is appended to, exactly
+    /// (cairn 0062): here `sh -c '<script>' x <cmd>`, so `$1` is the command.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_configured_shell_gets_the_command_as_its_last_argument() {
+        let shell: Vec<String> = ["sh", "-c", "echo \"got:$1\"", "x"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _h = spawn_with(
+            "t",
+            "hello world",
+            Some(&shell),
+            Path::new("."),
+            &Default::default(),
+            false,
+            tx,
+        )
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut said = String::new();
+        while tokio::time::Instant::now() < deadline && !said.contains("got:") {
+            if let Ok(Some(ProcEvent::Line(l))) =
+                tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+            {
+                said = strip_ansi(&l.text).into_owned();
+            }
+        }
+        assert_eq!(said, "got:hello world");
+    }
+
     #[test]
     fn a_cursor_query_is_found_even_split_across_reads() {
         let mut q = CursorQueries::default();
@@ -1302,6 +1342,7 @@ mod tests {
             let h = spawn_with(
                 "t",
                 "echo \"progress=$NEXTEST_SHOW_PROGRESS.\"",
+                None,
                 Path::new("."),
                 &env,
                 true,

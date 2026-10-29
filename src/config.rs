@@ -46,6 +46,11 @@ pub struct Project {
     /// `.env` files loaded into every node, before the node's own. Paths are
     /// relative to the workspace root.
     pub env_file: Option<EnvFiles>,
+    /// The shell every command runs through, unless a node sets its own. A
+    /// name (`"bash"`, `"pwsh"`) or an exact argv the command is appended to
+    /// (`["bash", "-eu", "-c"]`). Default: `/bin/sh -c`, and `cmd /C` on
+    /// Windows.
+    pub shell: Option<ShellSpec>,
     /// How the workspace is watched for changes.
     pub watch: Option<WatchConfig>,
     /// The longest any task may run, unless it sets its own `timeout`.
@@ -77,6 +82,7 @@ impl Default for Project {
             notify: false,
             concurrency: None,
             env_file: None,
+            shell: None,
             watch: None,
             task_timeout: None,
             profile: None,
@@ -123,6 +129,8 @@ pub struct Service {
     pub env: BTreeMap<String, String>,
     /// `.env` files for this node, after the project's and before inline `env`.
     pub env_file: Option<EnvFiles>,
+    /// The shell this node's command runs through; see `[project] shell`.
+    pub shell: Option<ShellSpec>,
     /// Reclaimed before start and checked for readiness if no explicit health probe.
     pub port: Option<u16>,
     pub health: Option<Health>,
@@ -603,6 +611,39 @@ fn d_liveness_failures() -> u32 {
     3
 }
 
+/// A shell, by name or as an exact argv (cairn 0062).
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ShellSpec {
+    Name(String),
+    Argv(Vec<String>),
+}
+
+impl ShellSpec {
+    /// The argv a command is appended to. A name gets the flag that shell
+    /// takes a command with; an argv is used exactly as written.
+    pub fn argv(&self) -> anyhow::Result<Vec<String>> {
+        match self {
+            ShellSpec::Argv(v) if v.is_empty() => bail!("`shell` cannot be an empty list"),
+            ShellSpec::Argv(v) => Ok(v.clone()),
+            ShellSpec::Name(n) if n.trim().is_empty() => bail!("`shell` cannot be empty"),
+            ShellSpec::Name(n) => {
+                let n = n.trim().to_string();
+                let base = std::path::Path::new(&n)
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                let flag = match base.as_str() {
+                    "cmd" => "/C",
+                    "pwsh" | "powershell" => "-Command",
+                    _ => "-c",
+                };
+                Ok(vec![n, flag.to_string()])
+            }
+        }
+    }
+}
+
 /// Who is responsible for rebuilding a service.
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -647,6 +688,8 @@ pub struct Task {
     pub env: BTreeMap<String, String>,
     /// `.env` files for this node, after the project's and before inline `env`.
     pub env_file: Option<EnvFiles>,
+    /// The shell this node's command runs through; see `[project] shell`.
+    pub shell: Option<ShellSpec>,
     #[serde(default)]
     pub depends_on: Vec<String>,
     /// Globs whose content hash forms the cache key. Empty inputs = never cached.
@@ -1196,6 +1239,41 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_shell_by_name_gets_its_own_command_flag() {
+        let argv = |s: ShellSpec| s.argv().unwrap();
+        assert_eq!(argv(ShellSpec::Name("bash".into())), ["bash", "-c"]);
+        assert_eq!(argv(ShellSpec::Name("pwsh".into())), ["pwsh", "-Command"]);
+        assert_eq!(
+            argv(ShellSpec::Name("powershell.exe".into())),
+            ["powershell.exe", "-Command"]
+        );
+        assert_eq!(
+            argv(ShellSpec::Name("C:/Windows/System32/cmd.exe".into()))[1],
+            "/C"
+        );
+        assert_eq!(
+            argv(ShellSpec::Argv(vec![
+                "bash".into(),
+                "-eu".into(),
+                "-c".into()
+            ])),
+            ["bash", "-eu", "-c"],
+            "an argv is used exactly as written"
+        );
+        assert!(ShellSpec::Argv(vec![]).argv().is_err());
+        assert!(ShellSpec::Name(" ".into()).argv().is_err());
+        let cfg: Config = toml::from_str(
+            "[project]\nshell = \"bash\"\n[tasks.a]\ncmd = \"x\"\nshell = [\"zsh\", \"-c\"]\n",
+        )
+        .unwrap();
+        assert_eq!(cfg.project.shell, Some(ShellSpec::Name("bash".into())));
+        assert_eq!(
+            cfg.tasks["a"].shell.as_ref().unwrap().argv().unwrap(),
+            ["zsh", "-c"]
+        );
+    }
 
     fn ws_at(root: &Path, toml_src: &str) -> Workspace {
         Workspace {
