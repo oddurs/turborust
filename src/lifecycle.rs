@@ -72,6 +72,8 @@ pub struct ReloadCounters {
     pub ready_matches_at_reload: u64,
     /// Errors rustc has reported since the rebuild began.
     pub errors: usize,
+    /// Lines matching `reloading.failed` since the latest reload or ready line.
+    pub failures: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -881,6 +883,22 @@ impl Service {
                         deadline: now + self.cfg.ready_timeout,
                     };
                 }
+                if let Rebuild::Ready { seen } = rebuild
+                    && c.failures > 0
+                {
+                    // A tool that announces only how a rebuild ended (`dx`
+                    // prints nothing when one starts) fails from ready: that
+                    // line is both the down edge and the verdict.
+                    out.push(Action::Log("reload failed: the process reported it".into()));
+                    out.push(Action::SetStatus(Status::Unhealthy));
+                    out.push(Action::SetReason("rebuild failed".into()));
+                    self.phase = Phase::Running {
+                        rebuild: Rebuild::Unready { seen },
+                        alive,
+                        pending: None,
+                    };
+                    return;
+                }
                 if matches!(rebuild, Rebuild::Ready { .. }) {
                     self.phase = Phase::Running {
                         rebuild,
@@ -934,7 +952,9 @@ impl Service {
             return;
         };
         let seen = rebuild.seen();
-        let ready_again = c.ready_matches > c.ready_matches_at_reload;
+        // A failure is forgotten by the next ready line, so one still counted
+        // means the ready line before it is not this rebuild coming back.
+        let ready_again = c.ready_matches > c.ready_matches_at_reload && c.failures == 0;
         if ready_again && probes_pass {
             out.push(Action::SetStatus(Status::Healthy));
             out.push(Action::SetReason("reloaded itself".into()));
@@ -945,7 +965,9 @@ impl Service {
             return;
         }
         if let Rebuild::Rebuilding { deadline, .. } = *rebuild {
-            let failure = if c.errors > 0 {
+            let failure = if c.failures > 0 {
+                Some("rebuild failed".to_string())
+            } else if c.errors > 0 {
                 // rustc has already said how this ends; waiting out the
                 // timeout would only delay saying so.
                 Some(format!(

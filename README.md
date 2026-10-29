@@ -422,8 +422,45 @@ versions. Then a rebuild is a state change rather than a restart:
 - **rustc reports an error** → `unhealthy` at once, with the error in the
   overlay's Issues panel. A rebuild that goes quiet instead is `unhealthy` after
   `ready_timeout`. Either way it comes good by itself on the next edit that builds.
+- **`reloading.failed`** matches → `unhealthy` at once, for a tool that reports
+  a failed build in its own words rather than passing rustc's errors through.
 
 `turborust plan` marks these nodes, because their edges behave differently.
+
+#### Worked example: `dx serve`
+
+Checked against `dx` 0.7.10 serving a Dioxus web app, with an `e2e` service that
+depends on it:
+
+```toml
+[services.web]
+cmd           = "dx serve --platform web --port 8080 --open false --interactive false"
+reload        = "self"
+health        = { log = "Build completed" }
+reloading     = { log = "Build completed in", failed = "Build failed" }
+ready_timeout = "10m"                   # a first wasm build is slow
+
+[services.e2e]
+cmd        = "npx playwright test"
+depends_on = ["web"]
+```
+
+- **`--interactive false`.** turborust runs every service on a terminal, and
+  `dx` draws its full-screen interface on one unless told not to.
+- **The first build** prints "Build completed successfully in …, launching
+  app!", which matches `health`, so `web` is healthy and `e2e` starts.
+- **A rebuild.** `dx` prints nothing when one starts, in any mode. It prints
+  "Build completed in 4.3s" when one ends, and that line matches `reloading`
+  and `health` both. turborust reads a line that is both as a rebuild that has
+  already finished: `web` goes reloading → healthy without a restart, and `e2e`
+  restarts because `web` produced a new result.
+- **An edit to `rsx!` only** is hot-reloaded by `dx` without a build. It prints
+  "Hotreloading: …" and nothing else, so nothing restarts, which is right.
+- **A build that fails.** `dx` prints rustc's message but not its location
+  ("ERROR mismatched types"), even with `--verbose`, so the Issues panel has
+  nothing to show. "Build failed" matches `failed`, so `web` is unhealthy at
+  once, `e2e` is stopped, and both come back on the next edit that builds. The
+  errors are in `web`'s log.
 
 ### When edits are not seen
 

@@ -385,6 +385,13 @@
       "description": "The reload-time counterpart of a readiness probe.\n\nOnly a log match, deliberately. A process that hot-patches itself keeps\nserving the old code while it rebuilds, so a port or HTTP probe passes\nthroughout and cannot say a rebuild has started.",
       "type": "object",
       "properties": {
+        "failed": {
+          "description": "Substring the process prints when a rebuild fails, for a tool whose\nerrors are not rustc's own diagnostics (`dx` prints \"Build failed\").\nThe node is unhealthy from that line until `health.log` next matches.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "log": {
           "description": "Substring the process prints when it starts a rebuild. Matched against\nANSI-stripped output.",
           "type": "string"

@@ -955,6 +955,75 @@ async fn a_rebuild_that_fails_is_unhealthy_at_once_and_its_errors_are_issues() {
 }
 
 #[tokio::test]
+async fn a_rebuild_that_only_says_how_it_ended_is_followed_both_ways() {
+    // Shaped like `dx serve` (0.7): nothing when a rebuild starts, one line
+    // when it ends either way, and errors with no location to read.
+    let mut h = Harness::start(
+        "self-reload-dx",
+        r#"
+        [services.web]
+        cmd = '''
+        echo 'INFO Build completed successfully in 1.2s, launching app!'
+        while true; do
+          if [ -f go ]; then
+            rm -f go
+            if [ -f broken ]; then
+              echo 'ERROR mismatched types'
+              echo 'ERROR Build failed: cargo build finished with errors'
+            else
+              echo 'INFO Build completed in 0.4s'
+            fi
+          fi
+          sleep 0.03
+        done
+        '''
+        reload = "self"
+        health = { log = "Build completed", interval = "40ms" }
+        reloading = { log = "Build completed in", failed = "Build failed" }
+        ready_timeout = "30s"
+        restart = "never"
+
+        [tasks.e2e]
+        depends_on = ["web"]
+        cmd = "echo ran >> e2e-runs"
+        cache = "disabled"
+        "#,
+        &["e2e"],
+    );
+    h.wait_for("the first e2e run", |_| h.lines_in("e2e-runs") == 1)
+        .await;
+
+    std::fs::write(h.path("broken"), "").unwrap();
+    let began = std::time::Instant::now();
+    h.trigger();
+    h.wait_for("web unhealthy", |st| {
+        matches!(st.nodes["web"].status, Status::Unhealthy)
+    })
+    .await;
+    assert!(
+        began.elapsed() < Duration::from_secs(5),
+        "the failure line should decide it, not the 30s timeout"
+    );
+    assert_eq!(h.reason("web"), "rebuild failed");
+    // Stays failed: the success before it is not a recovery.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(matches!(h.status("web"), Status::Unhealthy));
+    assert_eq!(
+        h.lines_in("e2e-runs"),
+        1,
+        "a failed build is not a new result"
+    );
+
+    std::fs::remove_file(h.path("broken")).unwrap();
+    h.trigger();
+    h.wait_for("e2e to run again", |_| h.lines_in("e2e-runs") == 2)
+        .await;
+    assert!(matches!(h.status("web"), Status::Healthy));
+    assert_eq!(h.restarts("web"), 0);
+    h.shutdown().await;
+}
+
+#[tokio::test]
 async fn a_rebuild_that_never_finishes_is_reported_as_a_failed_reload() {
     // Announces a rebuild, then says nothing — no error to read, so only the
     // timeout can decide.

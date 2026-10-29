@@ -733,11 +733,22 @@ fn under_restart_always_liveness_restarts_instead() {
 }
 
 fn counters(reloads: u64, ready: u64, at_reload: u64, errors: usize) -> Event {
+    failed_counters(reloads, ready, at_reload, errors, 0)
+}
+
+fn failed_counters(
+    reloads: u64,
+    ready: u64,
+    at_reload: u64,
+    errors: usize,
+    failures: u64,
+) -> Event {
     Event::ReloadCounters(ReloadCounters {
         reload_matches: reloads,
         ready_matches: ready,
         ready_matches_at_reload: at_reload,
         errors,
+        failures,
     })
 }
 
@@ -825,6 +836,46 @@ fn a_failing_self_reload_is_unhealthy_at_once_or_after_its_deadline() {
         logs(&acts),
         ["reload failed: rebuild did not finish within 1.0s"]
     );
+}
+
+#[test]
+fn a_rebuild_that_says_it_failed_is_unhealthy_until_one_succeeds() {
+    // `dx serve`: one line ends every rebuild, matching both `reloading` and
+    // `health`, and a failed one prints only "Build failed".
+    let t = Clock::new();
+    let mut m = self_reloading(&t);
+    // A rebuild that worked: reload and ready on the same line.
+    m.on(counters(1, 2, 1, 0), &none(), t.now());
+    assert_eq!(
+        status(&probe_reload(&mut m, true, &t)),
+        Some(Status::Healthy)
+    );
+
+    // Then one that failed, with no line at its start.
+    let acts = m.on(failed_counters(1, 2, 1, 0, 1), &none(), t.now());
+    assert_eq!(logs(&acts), ["reload failed: the process reported it"]);
+    assert_eq!(status(&acts), Some(Status::Unhealthy));
+    // Still failed on the next look: the ready line before it is not this
+    // rebuild coming back.
+    m.on(failed_counters(1, 2, 1, 0, 1), &none(), t.now());
+    assert!(probe_reload(&mut m, true, &t).is_empty());
+    // The next good build clears it, and says so as a reload.
+    let acts = m.on(counters(2, 3, 2, 0), &none(), t.now());
+    assert_eq!(status(&acts), Some(Status::Reloading));
+    assert_eq!(
+        status(&probe_reload(&mut m, true, &t)),
+        Some(Status::Healthy)
+    );
+    assert!(m.has_child(), "never restarted");
+
+    // With a line at the start, the failure ends the rebuild in flight.
+    let mut m = self_reloading(&t);
+    m.on(counters(1, 1, 1, 0), &none(), t.now());
+    probe_reload(&mut m, true, &t);
+    m.on(failed_counters(1, 1, 1, 0, 1), &none(), t.now());
+    let acts = probe_reload(&mut m, true, &t);
+    assert_eq!(logs(&acts), ["reload failed: rebuild failed"]);
+    assert_eq!(status(&acts), Some(Status::Unhealthy));
 }
 
 #[test]

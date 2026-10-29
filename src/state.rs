@@ -160,6 +160,11 @@ pub struct NodeState {
     /// `ready_matches` as it stood at the latest reload, so "ready again" means
     /// a match that came after it.
     pub ready_matches_at_reload: u64,
+    /// Substring that marks a self-managed rebuild as failed.
+    pub failed_pattern: Option<String>,
+    /// Times `failed_pattern` has matched since the latest reload or ready
+    /// line, so a failure is forgotten by the build that succeeds after it.
+    pub failed_matches: u64,
     /// Bumped every time this node completes a run or becomes healthy.
     ///
     /// Dependents compare generations rather than trusting edges: a node that
@@ -186,6 +191,8 @@ impl Default for NodeState {
             ready_matches: 0,
             reload_matches: 0,
             ready_matches_at_reload: 0,
+            failed_pattern: None,
+            failed_matches: 0,
             generation: 0,
         }
     }
@@ -740,9 +747,15 @@ impl AppState {
         }
     }
 
-    pub fn set_reload_pattern(&mut self, name: &str, pattern: Option<String>) {
+    pub fn set_reload_pattern(
+        &mut self,
+        name: &str,
+        pattern: Option<String>,
+        failed: Option<String>,
+    ) {
         if let Some(n) = self.nodes.get_mut(name) {
             n.reload_pattern = pattern;
+            n.failed_pattern = failed;
         }
     }
 

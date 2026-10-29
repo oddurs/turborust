@@ -147,8 +147,11 @@ impl Engine {
                     .and_then(|n| n.health.as_ref())
                     .and_then(|h| h.log.clone());
                 st.set_ready_pattern(name, pattern);
-                let reloading = plan.get(name).ok().and_then(|n| n.reloading.clone());
-                st.set_reload_pattern(name, reloading);
+                let (reloading, failed) = plan
+                    .get(name)
+                    .map(|n| (n.reloading.clone(), n.reload_failed.clone()))
+                    .unwrap_or_default();
+                st.set_reload_pattern(name, reloading, failed);
             }
         }
         let engine = Arc::new(Engine {
@@ -433,6 +436,7 @@ impl Engine {
                 ready_matches: n.ready_matches,
                 ready_matches_at_reload: n.ready_matches_at_reload,
                 errors: n.diag.errors(),
+                failures: n.failed_matches,
             })
             .unwrap_or_default()
     }
@@ -1565,6 +1569,7 @@ fn ingest_line(st: &mut AppState, line: proc::LogLine) {
         {
             n.reload_matches += 1;
             n.ready_matches_at_reload = n.ready_matches;
+            n.failed_matches = 0;
             // Here rather than when the supervisor next looks: the
             // errors this rebuild prints may already be on their
             // way, and resetting later would throw them away.
@@ -1577,6 +1582,12 @@ fn ingest_line(st: &mut AppState, line: proc::LogLine) {
         {
             n.log_ready = true;
             n.ready_matches += 1;
+            n.failed_matches = 0;
+        }
+        if let Some(pattern) = &n.failed_pattern
+            && plain.contains(pattern.as_str())
+        {
+            n.failed_matches += 1;
         }
         n.diag.push_plain(&plain);
     }

@@ -621,6 +621,10 @@ pub struct Reloading {
     /// Substring the process prints when it starts a rebuild. Matched against
     /// ANSI-stripped output.
     pub log: String,
+    /// Substring the process prints when a rebuild fails, for a tool whose
+    /// errors are not rustc's own diagnostics (`dx` prints "Build failed").
+    /// The node is unhealthy from that line until `health.log` next matches.
+    pub failed: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone)]
