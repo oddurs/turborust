@@ -1,0 +1,54 @@
+{
+  "$defs": {
+    "HistoryRecord": {
+      "description": "One history entry as the control socket and the dashboard serve it.",
+      "properties": {
+        "ms": {
+          "description": "Milliseconds since the session began.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "node": {
+          "type": "string"
+        },
+        "seq": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "what": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "seq",
+        "ms",
+        "node",
+        "what"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`/__turborust/history`.",
+  "properties": {
+    "history": {
+      "description": "Oldest first.",
+      "items": {
+        "$ref": "#/$defs/HistoryRecord"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "history"
+  ],
+  "title": "turborust history output",
+  "type": "object"
+}

@@ -1,0 +1,244 @@
+{
+  "$defs": {
+    "BuildInfo": {
+      "description": "What the last task run did \u2014 the overlay's \"why did that happen\" surface.",
+      "properties": {
+        "cached": {
+          "type": "boolean"
+        },
+        "changed": {
+          "description": "Inputs that differed from the previous run, newest build first.",
+          "items": {
+            "$ref": "#/$defs/ChangedFile"
+          },
+          "type": "array"
+        },
+        "duration_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "key": {
+          "description": "Short blake3 cache key.",
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "cached",
+        "duration_ms",
+        "key",
+        "changed"
+      ],
+      "type": "object"
+    },
+    "ChangedFile": {
+      "properties": {
+        "from": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "to": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "path",
+        "from",
+        "to"
+      ],
+      "type": "object"
+    },
+    "IssueSnapshot": {
+      "properties": {
+        "code": {
+          "description": "`E0425`, when rustc supplies one.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "column": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "file": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "frame": {
+          "description": "The code frame, verbatim and ANSI-free, for display under the message.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "level": {
+          "$ref": "#/$defs/Level"
+        },
+        "line": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "message": {
+          "type": "string"
+        },
+        "node": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "node",
+        "level",
+        "message",
+        "frame"
+      ],
+      "type": "object"
+    },
+    "Level": {
+      "enum": [
+        "error",
+        "warning"
+      ],
+      "type": "string"
+    },
+    "NodeSnapshot": {
+      "description": "One node, flattened for the wire.",
+      "properties": {
+        "blocked": {
+          "type": "boolean"
+        },
+        "errors": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "label": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "pid": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "port": {
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "restarts": {
+          "format": "uint32",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "status": {
+          "type": "string"
+        },
+        "uptime_ms": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "name",
+        "kind",
+        "status",
+        "label",
+        "restarts",
+        "blocked",
+        "errors"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "properties": {
+    "build": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BuildInfo"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "issues": {
+      "items": {
+        "$ref": "#/$defs/IssueSnapshot"
+      },
+      "type": "array"
+    },
+    "log_count": {
+      "description": "How many lines exist, so the overlay can show a count without carrying\nthe lines themselves in every frame.",
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "nodes": {
+      "items": {
+        "$ref": "#/$defs/NodeSnapshot"
+      },
+      "type": "array"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "shutting_down": {
+      "type": "boolean"
+    },
+    "status": {
+      "description": "Aggregate: \"error\" | \"building\" | \"ready\" | \"stopped\".",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "status",
+    "nodes",
+    "issues",
+    "log_count",
+    "shutting_down"
+  ],
+  "title": "turborust state output",
+  "type": "object"
+}

@@ -1,0 +1,105 @@
+{
+  "$defs": {
+    "Sweep": {
+      "description": "What the last eviction dropped, so a surprising miss can be explained.",
+      "properties": {
+        "at": {
+          "description": "Seconds since the epoch.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "dropped": {
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "freed": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "at",
+        "dropped",
+        "freed"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`cache --json`.",
+  "properties": {
+    "budgetBytes": {
+      "description": "The local store's byte budget; absent when there is none.",
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "byTask": {
+      "additionalProperties": {
+        "maxItems": 2,
+        "minItems": 2,
+        "prefixItems": [
+          {
+            "format": "uint64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          {
+            "format": "uint",
+            "minimum": 0,
+            "type": "integer"
+          }
+        ],
+        "type": "array"
+      },
+      "description": "Task name -> [bytes, record count].",
+      "type": "object"
+    },
+    "bytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "lastSweep": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/Sweep"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "records": {
+      "format": "uint",
+      "minimum": 0,
+      "type": "integer"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "sharedBytes": {
+      "format": "uint64",
+      "minimum": 0,
+      "type": [
+        "integer",
+        "null"
+      ]
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "bytes",
+    "records",
+    "byTask"
+  ],
+  "title": "turborust cache output",
+  "type": "object"
+}

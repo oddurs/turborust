@@ -255,6 +255,11 @@ fn env_files(
 }
 
 pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
+    resolve_unchecked(ws, targets)
+        .map_err(|e| crate::contract::Failure::coded(crate::contract::Code::PlanInvalid, e))
+}
+
+fn resolve_unchecked(ws: &Workspace, targets: &[String]) -> Result<Plan> {
     let metadata = Metadata::load(&ws.root)?;
 
     let roots: Vec<String> = if targets.is_empty() {

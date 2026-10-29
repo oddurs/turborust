@@ -2,6 +2,7 @@ pub mod affected;
 pub mod cache;
 pub mod cargo;
 pub mod config;
+pub mod contract;
 pub mod control;
 pub mod ctl;
 pub mod diag;
