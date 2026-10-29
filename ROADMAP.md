@@ -193,11 +193,10 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`#########·` 87% · 13 of 15 done
+`##########` 93% · 14 of 15 done
 
 ### backlog
 
-- [ ] `0098` A command cannot see which files changed <sup>feature · p3</sup>
 - [ ] `0101` An edit right after the watch starts can be missed <sup>bug · p2</sup>
 
 ### done
@@ -215,4 +214,5 @@ Good ideas without a date yet.
 - [x] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
 - [x] `0096` A crash loop never gives up <sup>feature · p3</sup>
 - [x] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
+- [x] `0098` A command cannot see which files changed <sup>feature · p3</sup>
 
