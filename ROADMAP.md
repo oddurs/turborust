@@ -193,11 +193,10 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`#######···` 67% · 10 of 15 done
+`########··` 73% · 11 of 15 done
 
 ### backlog
 
-- [ ] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
 - [ ] `0096` A crash loop never gives up <sup>feature · p3</sup>
 - [ ] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
 - [ ] `0098` A command cannot see which files changed <sup>feature · p3</sup>
@@ -215,4 +214,5 @@ Good ideas without a date yet.
 - [x] `0092` A service that stops answering stays healthy <sup>feature · p1</sup>
 - [x] `0093` There is no way to load a .env file <sup>feature · p1</sup>
 - [x] `0094` No polling fallback where file events do not arrive <sup>feature · p2</sup>
+- [x] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
 

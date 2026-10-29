@@ -58,6 +58,8 @@ pub struct Node {
     pub debounce: Duration,
     pub ready_timeout: Duration,
     pub stop_timeout: Duration,
+    /// How long a task may run before it is stopped and failed. Tasks only.
+    pub timeout: Option<Duration>,
     pub backoff_min: Duration,
     pub backoff_max: Duration,
     /// Set when globs came from cargo rather than the config file, so `why` can
@@ -386,6 +388,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             debounce: pd(&s.debounce)?,
             ready_timeout: pd(&s.ready_timeout)?,
             stop_timeout: pd(&s.stop_timeout)?,
+            timeout: None,
             backoff_min: pd(&s.backoff_min)?,
             backoff_max: pd(&s.backoff_max)?,
             derived_from_crate: derived,
@@ -451,6 +454,18 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         debounce: pd("120ms")?,
         ready_timeout: pd("60s")?,
         stop_timeout: pd("8s")?,
+        timeout: t
+            .timeout
+            .as_ref()
+            .or(ws.config.project.task_timeout.as_ref())
+            .map(|v| {
+                let d = pd(v).map_err(|e| anyhow::anyhow!("task `{name}`: timeout: {e}"))?;
+                if d.is_zero() {
+                    bail!("task `{name}`: a timeout of zero would fail it before it starts");
+                }
+                Ok(d)
+            })
+            .transpose()?,
         backoff_min: pd("250ms")?,
         backoff_max: pd("30s")?,
         derived_from_crate: derived,
@@ -631,6 +646,27 @@ mod tests {
             ));
             assert!(e.contains(&format!("health.{key}")), "{e}");
         }
+    }
+
+    #[test]
+    fn a_task_timeout_must_parse_and_be_more_than_nothing() {
+        // Cover for cairn 0095.
+        let with = |extra: &str| {
+            plan_err(&format!(
+                "{extra}[services.s]\ncmd = \"x\"\ndepends_on = [\"t\"]\n[tasks.t]\ncmd = \"x\"\n"
+            ))
+        };
+        let own = |t: &str| {
+            plan_err(&format!(
+                "[services.s]\ncmd = \"x\"\ndepends_on = [\"t\"]\n[tasks.t]\ncmd = \"x\"\ntimeout = \"{t}\"\n"
+            ))
+        };
+        let e = own("forever");
+        assert!(e.contains("task `t`: timeout"), "{e}");
+        let e = own("0s");
+        assert!(e.contains("zero"), "{e}");
+        let e = with("[project]\ntask_timeout = \"soon\"\n");
+        assert!(e.contains("task `t`: timeout"), "{e}");
     }
 
     #[test]

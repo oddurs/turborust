@@ -47,6 +47,8 @@ pub struct Project {
     pub env_file: Option<EnvFiles>,
     /// How the workspace is watched for changes.
     pub watch: Option<WatchConfig>,
+    /// The longest any task may run, unless it sets its own `timeout`.
+    pub task_timeout: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Default)]
@@ -71,6 +73,7 @@ impl Default for Project {
             concurrency: None,
             env_file: None,
             watch: None,
+            task_timeout: None,
         }
     }
 }
@@ -649,6 +652,9 @@ pub struct Task {
     pub target_dir: TargetDir,
     #[serde(default)]
     pub cache: CachePolicy,
+    /// Stop the task and fail it once it has run this long, e.g. `"10m"`.
+    /// Overrides `project.task_timeout`.
+    pub timeout: Option<String>,
 }
 
 /// How much of the ambient environment a task's command may see.

@@ -778,3 +778,133 @@ async fn without_verification_a_drifting_task_still_hits() {
         "with verify off the cache is trusted, as documented"
     );
 }
+
+fn log_text(engine: &Engine) -> String {
+    let st = engine.state.lock().unwrap();
+    st.logs
+        .view(None)
+        .iter()
+        .map(|l| turborust::proc::strip_ansi(&l.text))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Running, as opposed to gone or a zombie waiting for a parent to reap it —
+/// which, once orphaned, depends on whatever PID 1 is in the container.
+fn alive(pid: i32) -> bool {
+    match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(stat) => !stat
+            .rsplit(')')
+            .next()
+            .unwrap_or("")
+            .trim_start()
+            .starts_with('Z'),
+        // No procfs (macOS): signal 0 is the best available answer.
+        Err(_) => unsafe { libc::kill(pid, 0) == 0 },
+    }
+}
+
+#[tokio::test]
+async fn a_task_over_its_timeout_is_stopped_tree_and_all() {
+    // Cover for cairn 0095: a task that hangs used to hold the run until
+    // something outside killed it. The grandchild is the point: stopping only
+    // the shell would leave `sleep` running after turborust reported.
+    let sb = Sandbox::new("timeout");
+    let began = std::time::Instant::now();
+    let (code, engine) = run(
+        &sb,
+        r#"
+        [tasks.hang]
+        cmd = "sleep 60 & echo $! > child; wait"
+        timeout = "400ms"
+        "#,
+        &["hang"],
+    )
+    .await;
+    assert_eq!(code, engine::TIMED_OUT, "a timeout has its own exit code");
+    assert!(
+        began.elapsed() < Duration::from_secs(15),
+        "{:?}",
+        began.elapsed()
+    );
+    let log = log_text(&engine);
+    assert!(log.contains("timed out after 400ms"), "{log}");
+    assert!(matches!(
+        engine.state.lock().unwrap().nodes["hang"].status,
+        Status::Failed(engine::TIMED_OUT)
+    ));
+    let pid: i32 = std::fs::read_to_string(sb.path("child"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    assert!(!alive(pid), "the task's child outlived its timeout");
+}
+
+#[tokio::test]
+async fn a_task_timeout_overrides_the_project_default() {
+    let sb = Sandbox::new("timeout-default");
+    let src = r#"
+        [project]
+        task_timeout = "300ms"
+
+        [tasks.slow]
+        cmd = "sleep 0.8; touch slow-ran"
+        timeout = "10s"
+
+        [tasks.capped]
+        cmd = "sleep 5; touch capped-ran"
+        depends_on = ["slow"]
+        "#;
+    let (code, _) = run(&sb, src, &["capped"]).await;
+    assert!(
+        sb.path("slow-ran").exists(),
+        "its own timeout should have let it finish"
+    );
+    assert!(!sb.path("capped-ran").exists());
+    assert_eq!(code, engine::TIMED_OUT, "the project default still applies");
+}
+
+#[tokio::test]
+async fn continue_keeps_unrelated_work_going_after_a_timeout() {
+    let sb = Sandbox::new("timeout-continue");
+    let code = run_continue(
+        &sb,
+        r#"
+        [tasks.hang]
+        cmd = "sleep 60"
+        timeout = "300ms"
+
+        [tasks.unrelated]
+        cmd = "sleep 0.6; touch unrelated-ran"
+
+        [tasks.top]
+        depends_on = ["hang", "unrelated"]
+        cmd = "touch top-ran"
+        "#,
+        &["top"],
+    )
+    .await;
+    assert_eq!(code, engine::TIMED_OUT);
+    assert!(sb.path("unrelated-ran").exists());
+    assert!(!sb.path("top-ran").exists());
+}
+
+#[tokio::test]
+async fn a_command_that_exits_124_itself_is_an_ordinary_failure() {
+    // The code alone cannot say a timeout happened; the task must still be
+    // marked failed, or the run waits for it forever.
+    let sb = Sandbox::new("timeout-124");
+    let (code, engine) = run(
+        &sb,
+        r#"
+        [tasks.own]
+        cmd = "exit 124"
+        timeout = "10s"
+        "#,
+        &["own"],
+    )
+    .await;
+    assert_eq!(code, 124);
+    assert!(!log_text(&engine).contains("timed out"));
+}

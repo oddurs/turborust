@@ -316,6 +316,13 @@
           "type": "boolean",
           "default": false
         },
+        "task_timeout": {
+          "description": "The longest any task may run, unless it sets its own `timeout`.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "watch": {
           "description": "How the workspace is watched for changes.",
           "anyOf": [
@@ -791,6 +798,13 @@
         },
         "target_dir": {
           "$ref": "#/$defs/TargetDir"
+        },
+        "timeout": {
+          "description": "Stop the task and fail it once it has run this long, e.g. `\"10m\"`.\nOverrides `project.task_timeout`.",
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "additionalProperties": false

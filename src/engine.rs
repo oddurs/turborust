@@ -187,6 +187,37 @@ impl Engine {
         code
     }
 
+    /// `wait_registered`, but a task still running at `limit` is stopped as a
+    /// shutdown would stop it — the whole tree, `grace` to go quietly — and
+    /// fails with [`TIMED_OUT`], saying which limit it hit.
+    ///
+    /// The flag, not the code, says it timed out: a command may exit 124 itself.
+    async fn wait_limited(
+        &self,
+        name: &str,
+        handle: Handle,
+        limit: Duration,
+        grace: Duration,
+    ) -> (i32, bool) {
+        let handle = Arc::new(handle);
+        self.register_handle(name, handle.clone());
+        let outcome = tokio::select! {
+            code = wait_exit(&handle) => (code, false),
+            _ = tokio::time::sleep(limit) => {
+                let _ = handle.stop(grace).await;
+                let _ = wait_exit(&handle).await;
+                self.fail(
+                    name,
+                    format!("timed out after {}; stopped", fmt_limit(limit)),
+                    TIMED_OUT,
+                );
+                (TIMED_OUT, true)
+            }
+        };
+        self.forget_handle(name);
+        outcome
+    }
+
     /// The running child for `name`, if there is one.
     pub fn handle_for(&self, name: &str) -> Option<Arc<Handle>> {
         self.handles.lock().unwrap().get(name).cloned()
@@ -722,10 +753,18 @@ impl Engine {
             node.env_mode == EnvMode::Strict,
             self.events_tx.clone(),
         )?;
-        let code = self.wait_registered(name, handle).await;
+        let (code, timed_out) = match node.timeout {
+            None => (self.wait_registered(name, handle).await, false),
+            Some(limit) => {
+                self.wait_limited(name, handle, limit, node.stop_timeout)
+                    .await
+            }
+        };
         let duration = start.elapsed();
 
-        if code == 0 {
+        if timed_out {
+            // Already reported and marked failed by `wait_limited`.
+        } else if code == 0 {
             if let Some(fp) = &fp {
                 self.record_build(name, false, duration, fp, changed);
             }
@@ -965,6 +1004,21 @@ async fn await_tasks(engine: &Engine, tasks: &[String]) -> i32 {
             }
         }
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// The exit code of a task stopped for running past its `timeout`: the one GNU
+/// `timeout(1)` uses, so scripts that already know it read it right.
+pub const TIMED_OUT: i32 = 124;
+
+/// A limit as it would have been written: `10m`, not `600s`.
+fn fmt_limit(d: Duration) -> String {
+    let ms = d.as_millis();
+    match () {
+        _ if ms.is_multiple_of(3_600_000) => format!("{}h", ms / 3_600_000),
+        _ if ms.is_multiple_of(60_000) => format!("{}m", ms / 60_000),
+        _ if ms.is_multiple_of(1000) => format!("{}s", ms / 1000),
+        _ => format!("{ms}ms"),
     }
 }
 
