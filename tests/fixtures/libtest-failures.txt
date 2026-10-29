@@ -1,0 +1,38 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+     Running unittests src/lib.rs (target/debug/deps/failing-24aeea1c8166adbb)
+
+running 4 tests
+test tests::says_error ... FAILED
+test tests::adds ... ok
+test tests::unwraps ... FAILED
+test tests::wrong_sum ... FAILED
+
+failures:
+
+---- tests::says_error stdout ----
+
+thread 'tests::says_error' (22805) panicked at src/lib.rs:13:23:
+error: looks like a compiler line
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- tests::unwraps stdout ----
+
+thread 'tests::unwraps' (22806) panicked at src/lib.rs:11:71:
+called `Result::unwrap()` on an `Err` value: "boom"
+
+---- tests::wrong_sum stdout ----
+
+thread 'tests::wrong_sum' (22807) panicked at src/lib.rs:9:22:
+assertion `left == right` failed: two and two
+  left: 4
+ right: 5
+
+
+failures:
+    tests::says_error
+    tests::unwraps
+    tests::wrong_sum
+
+test result: FAILED. 1 passed; 3 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `--lib`

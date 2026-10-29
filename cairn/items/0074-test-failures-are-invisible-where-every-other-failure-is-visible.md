@@ -2,7 +2,7 @@
 id: 74
 title: Test failures are invisible where every other failure is visible
 type: feature
-status: backlog
+status: doing
 milestone: v1.4
 created: 2026-09-10
 updated: 2026-09-10

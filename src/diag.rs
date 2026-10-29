@@ -7,6 +7,14 @@
 //!
 //! Both of cargo's human formats are handled: the default multi-line form with a
 //! code frame, and `--message-format short`, which is one line per diagnostic.
+//!
+//! So are failing tests (cairn 0074), from the line every Rust test failure
+//! prints, under libtest and nextest alike: `thread '<test>' panicked at
+//! <file>:<line>:<col>:` and the message after it. A failure becomes an error
+//! with code `panic`, so it reaches everywhere a compile error does — the TUI,
+//! the overlay's Issues panel with an editor link, and the run summary.
+//! Machine formats were considered and not used: libtest's JSON is
+//! nightly-only, and nextest's libtest-compatible JSON is still experimental.
 //! Parsing is done by hand rather than with a regex crate — the grammar is small,
 //! and the dependency would not pay for itself.
 
@@ -55,6 +63,8 @@ pub struct Parser {
     open: Option<usize>,
     /// Errors seen past the cap, still counted so the tally stays true.
     dropped_errors: usize,
+    /// Index of a test failure still collecting its panic message.
+    open_test: Option<usize>,
 }
 
 /// Diagnostics kept between resets. Only a new build resets, and a service
@@ -73,6 +83,7 @@ impl Parser {
     pub fn reset(&mut self) {
         self.diagnostics.clear();
         self.open = None;
+        self.open_test = None;
         self.dropped_errors = 0;
     }
 
@@ -108,6 +119,38 @@ impl Parser {
     /// `push_line` for text already stripped of escapes.
     pub fn push_plain(&mut self, line: &str) {
         let line = line.trim_end();
+
+        // A panic message runs until a blank line or the next thing libtest
+        // or nextest prints, and may itself look like anything — `error: …`
+        // included — so it is collected before any other reading.
+        if let Some(idx) = self.open_test {
+            if ends_panic_message(line) {
+                self.open_test = None;
+            } else {
+                let d = &mut self.diagnostics[idx];
+                if d.message.ends_with("panicked") {
+                    d.message = format!("{}: {}", d.message, line.trim());
+                } else if d.frame.len() < 40 {
+                    d.frame.push(line.to_string());
+                }
+                return;
+            }
+        }
+        if let Some(d) = parse_panic(line) {
+            // nextest can print a failure's output twice: once as it fails and
+            // again in the final summary.
+            let seen = self.diagnostics.iter().any(|e| {
+                e.code == d.code
+                    && e.file == d.file
+                    && e.line == d.line
+                    && e.message.starts_with(&d.message)
+            });
+            self.open = None;
+            if !seen && self.keep(d) {
+                self.open_test = Some(self.diagnostics.len() - 1);
+            }
+            return;
+        }
 
         if let Some(d) = parse_short(line) {
             self.keep(d);
@@ -225,8 +268,66 @@ fn split_location(s: &str) -> Option<(String, u32, u32)> {
 }
 
 /// Cargo's tallies and wrap-ups, which are not actionable diagnostics.
+/// `thread '<name>' panicked at <file>:<line>:<col>:` — with the thread's id,
+/// `'<name>' (<id>) panicked`, in recent releases — or, before Rust 1.73,
+/// `thread '<name>' panicked at '<message>', <file>:<line>:<col>`.
+fn parse_panic(line: &str) -> Option<Diagnostic> {
+    let rest = line.trim_start().strip_prefix("thread '")?;
+    let (name, rest) = rest.split_once('\'')?;
+    let rest = rest.trim_start();
+    let rest = match rest.strip_prefix('(') {
+        Some(id) => id.split_once(')')?.1.trim_start(),
+        None => rest,
+    };
+    let rest = rest.strip_prefix("panicked at ")?;
+    let (message, location) = match rest.strip_prefix('\'') {
+        // The old form carries the message inline, before the location.
+        Some(inline) => {
+            let (msg, loc) = inline.rsplit_once("', ")?;
+            (Some(msg.to_string()), loc)
+        }
+        None => (None, rest.strip_suffix(':').unwrap_or(rest)),
+    };
+    let (file, l, c) = split_location(location)?;
+    // A test runs on a thread named for it, so this names a failing test; a
+    // service's panic, on `main` or a worker, reads as what it is.
+    let head = format!("`{name}` panicked");
+    Some(Diagnostic {
+        level: Level::Error,
+        code: Some("panic".into()),
+        message: match message {
+            Some(m) => format!("{head}: {m}"),
+            None => head,
+        },
+        file: Some(file),
+        line: Some(l),
+        column: Some(c),
+        frame: Vec::new(),
+    })
+}
+
+/// Where a panic's message ends: a blank line, or what the test harness
+/// prints next.
+fn ends_panic_message(line: &str) -> bool {
+    let t = line.trim_start();
+    line.trim().is_empty()
+        || t.starts_with("note: run with `RUST_BACKTRACE")
+        || t.starts_with("stack backtrace:")
+        || t.starts_with("thread '")
+        || t.starts_with("---- ")
+        || t.starts_with("────")
+        || t.starts_with("test ")
+        || t.starts_with("failures:")
+        || t.starts_with("FAIL ")
+        || t.starts_with("PASS ")
+        || t.starts_with("error: test failed")
+}
+
 fn is_summary(message: &str) -> bool {
     message.starts_with("could not compile")
+        // cargo's own line after failing tests; the failures themselves are
+        // the diagnostics.
+        || message.starts_with("test failed, to rerun pass")
         || message.starts_with("aborting due to")
         || message.starts_with("build failed")
         || message.starts_with("generated ")
@@ -301,6 +402,94 @@ error: could not compile `api` (bin "api") due to 1 previous error
         assert_eq!(d[1].level, Level::Warning);
         assert_eq!(d[1].file.as_deref(), Some("b.rs"));
         assert!(!d[0].frame.iter().any(|l| l.contains("second")));
+    }
+
+    /// Real `cargo test` output, captured from a crate with three failing
+    /// tests: a custom panic that reads like a compiler error, an `unwrap`, and
+    /// an `assert_eq!` with a message.
+    #[test]
+    fn failing_tests_become_errors_with_their_location() {
+        for fixture in [
+            include_str!("../tests/fixtures/libtest-failures.txt"),
+            include_str!("../tests/fixtures/libtest-failures-backtrace.txt"),
+        ] {
+            let d = parse(fixture);
+            assert_eq!(d.len(), 3, "{d:#?}");
+            assert!(
+                d.iter()
+                    .all(|d| d.level == Level::Error && d.code.as_deref() == Some("panic"))
+            );
+            let by = |name: &str| d.iter().find(|d| d.message.contains(name)).unwrap();
+
+            let custom = by("tests::says_error");
+            assert_eq!(
+                custom.message,
+                "`tests::says_error` panicked: error: looks like a compiler line"
+            );
+            assert_eq!(custom.location().as_deref(), Some("src/lib.rs:13:23"));
+
+            let eq = by("tests::wrong_sum");
+            assert_eq!(
+                eq.message,
+                "`tests::wrong_sum` panicked: assertion `left == right` failed: two and two"
+            );
+            assert_eq!(eq.frame, vec!["  left: 4", " right: 5"]);
+            assert_eq!(eq.location().as_deref(), Some("src/lib.rs:9:22"));
+
+            assert!(
+                by("tests::unwraps")
+                    .message
+                    .ends_with("on an `Err` value: \"boom\"")
+            );
+        }
+    }
+
+    #[test]
+    fn nextest_failures_are_read_the_same_and_once() {
+        // nextest's own lines around the same panic, printed as the test fails
+        // and again in its final summary.
+        let out = "        FAIL [   0.004s] failing tests::wrong_sum
+──── STDOUT:             failing tests::wrong_sum
+──── STDERR:             failing tests::wrong_sum
+thread 'tests::wrong_sum' (31) panicked at src/lib.rs:9:22:
+assertion `left == right` failed
+  left: 4
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+     Summary [   0.010s] 2 tests run: 1 passed, 1 failed, 0 skipped
+        FAIL [   0.004s] failing tests::wrong_sum
+──── STDERR:             failing tests::wrong_sum
+thread 'tests::wrong_sum' (31) panicked at src/lib.rs:9:22:
+assertion `left == right` failed
+  left: 4
+ right: 5
+";
+        let d = parse(out);
+        assert_eq!(d.len(), 1, "{d:#?}");
+        assert_eq!(d[0].frame, vec!["  left: 4", " right: 5"]);
+    }
+
+    #[test]
+    fn the_pre_1_73_panic_form_is_read_too() {
+        let d = parse(
+            "thread 'tests::old' panicked at 'it broke', src/lib.rs:3:5\nnote: run with `RUST_BACKTRACE=1`",
+        );
+        assert_eq!(d.len(), 1);
+        assert_eq!(d[0].message, "`tests::old` panicked: it broke");
+        assert_eq!(d[0].location().as_deref(), Some("src/lib.rs:3:5"));
+    }
+
+    #[test]
+    fn a_service_panic_is_named_for_its_thread_not_as_a_test() {
+        let d = parse("thread 'main' (7) panicked at src/main.rs:4:5:\nport 8080 in use");
+        assert_eq!(d[0].message, "`main` panicked: port 8080 in use");
+    }
+
+    #[test]
+    fn cargo_s_test_failed_line_is_not_a_second_error() {
+        let d = parse("error: test failed, to rerun pass `--lib`");
+        assert!(d.is_empty(), "{d:#?}");
     }
 
     #[test]

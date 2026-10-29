@@ -133,6 +133,10 @@ pub struct RunSummary {
     pub exit_code: i32,
     pub global: crate::global::GlobalHash,
     pub tasks: Vec<TaskOutcomeRecord>,
+    /// Every diagnostic the run's output held at the end — compile errors,
+    /// warnings and failing tests — with the node it came from. Additive, so
+    /// the schema version stands.
+    pub issues: Vec<crate::state::IssueSnapshot>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -229,6 +233,7 @@ mod tests {
             exit_code: 0,
             global: crate::global::GlobalHash::default(),
             tasks: vec![],
+            issues: Vec::new(),
         };
         assert!(
             serde_json::to_string(&summary)
@@ -248,6 +253,7 @@ mod tests {
             exit_code: 0,
             global: crate::global::GlobalHash::default(),
             tasks: vec![],
+            issues: Vec::new(),
         };
         let path = write(&dir, &summary).unwrap();
         assert!(path.ends_with("1234.json"));

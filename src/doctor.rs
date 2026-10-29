@@ -116,7 +116,28 @@ pub fn diagnose_with(root: &Path, meta: Option<&Metadata>, split_nodes: &[String
     if let Some(f) = check_split_targets(root, split_nodes) {
         out.push(f);
     }
+    if let Some(f) = check_nextest(which("cargo-nextest")) {
+        out.push(f);
+    }
     out
+}
+
+/// A suggestion, never a requirement: failing tests are read from libtest's
+/// output as well as nextest's (cairn 0074).
+fn check_nextest(installed: bool) -> Option<Finding> {
+    if installed {
+        return None;
+    }
+    Some(Finding {
+        apply: None,
+        severity: Severity::Info,
+        title: "cargo-nextest is not installed".into(),
+        detail: "Runs each test in its own process, so one panic cannot take the \
+                 others with it, and is fast enough to run on save. turborust reads \
+                 its failures as it reads `cargo test`'s."
+            .into(),
+        fix: Some("cargo install cargo-nextest --locked".into()),
+    })
 }
 
 /// Warns when the workspace sits on a filesystem that delivers no change
@@ -509,6 +530,17 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn nextest_is_suggested_only_when_absent() {
+        let f = check_nextest(false).expect("a suggestion when absent");
+        assert!(
+            matches!(f.severity, Severity::Info),
+            "a suggestion, not a warning"
+        );
+        assert!(check_nextest(true).is_none());
+    }
+
     #[test]
     fn a_workspace_on_a_mount_without_events_is_recognised() {
         let info = "\
