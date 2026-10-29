@@ -63,8 +63,9 @@ pub struct Parser {
     open: Option<usize>,
     /// Errors seen past the cap, still counted so the tally stays true.
     dropped_errors: usize,
-    /// Index of a test failure still collecting its panic message.
-    open_test: Option<usize>,
+    /// A test failure still collecting its panic message: its index, and how
+    /// far its first line was indented.
+    open_test: Option<(usize, usize)>,
 }
 
 /// Diagnostics kept between resets. Only a new build resets, and a service
@@ -123,7 +124,7 @@ impl Parser {
         // A panic message runs until a blank line or the next thing libtest
         // or nextest prints, and may itself look like anything — `error: …`
         // included — so it is collected before any other reading.
-        if let Some(idx) = self.open_test {
+        if let Some((idx, indent)) = self.open_test {
             if ends_panic_message(line) {
                 self.open_test = None;
             } else {
@@ -131,7 +132,10 @@ impl Parser {
                 if d.message.ends_with("panicked") {
                     d.message = format!("{}: {}", d.message, line.trim());
                 } else if d.frame.len() < 40 {
-                    d.frame.push(line.to_string());
+                    // nextest indents a test's output; the message's own
+                    // indentation (`  left: 4`) is what is kept.
+                    let cut = line.bytes().take(indent).take_while(|b| *b == b' ').count();
+                    d.frame.push(line[cut..].to_string());
                 }
                 return;
             }
@@ -147,7 +151,8 @@ impl Parser {
             });
             self.open = None;
             if !seen && self.keep(d) {
-                self.open_test = Some(self.diagnostics.len() - 1);
+                let indent = line.len() - line.trim_start().len();
+                self.open_test = Some((self.diagnostics.len() - 1, indent));
             }
             return;
         }
@@ -328,6 +333,8 @@ fn is_summary(message: &str) -> bool {
         // cargo's own line after failing tests; the failures themselves are
         // the diagnostics.
         || message.starts_with("test failed, to rerun pass")
+        // nextest's.
+        || message == "test run failed"
         || message.starts_with("aborting due to")
         || message.starts_with("build failed")
         || message.starts_with("generated ")
@@ -412,6 +419,9 @@ error: could not compile `api` (bin "api") due to 1 previous error
         for fixture in [
             include_str!("../tests/fixtures/libtest-failures.txt"),
             include_str!("../tests/fixtures/libtest-failures-backtrace.txt"),
+            // nextest 0.9.150 on a pty, as turborust runs it: indented, and
+            // ending in its own "error: test run failed".
+            include_str!("../tests/fixtures/nextest-failures.txt"),
         ] {
             let d = parse(fixture);
             assert_eq!(d.len(), 3, "{d:#?}");

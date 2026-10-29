@@ -1,0 +1,70 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.01s
+------------
+ Nextest run ID db41b0b5-ac57-40df-8571-a918b32e1263 with nextest profile: default
+    Starting 4 tests across 1 binary
+        FAIL [   0.009s] (1/4) failing tests::says_error
+  stdout ---
+
+    running 1 test
+    test tests::says_error ... FAILED
+
+    failures:
+
+    failures:
+        tests::says_error
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ---
+
+    thread 'tests::says_error' (26151) panicked at src/lib.rs:13:23:
+    error: looks like a compiler line
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.009s] (2/4) failing tests::unwraps
+  stdout ---
+
+    running 1 test
+    test tests::unwraps ... FAILED
+
+    failures:
+
+    failures:
+        tests::unwraps
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ---
+
+    thread 'tests::unwraps' (26152) panicked at src/lib.rs:11:71:
+    called `Result::unwrap()` on an `Err` value: "boom"
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        FAIL [   0.010s] (3/4) failing tests::wrong_sum
+  stdout ---
+
+    running 1 test
+    test tests::wrong_sum ... FAILED
+
+    failures:
+
+    failures:
+        tests::wrong_sum
+
+    test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 3 filtered out; finished in 0.00s
+
+  stderr ---
+
+    thread 'tests::wrong_sum' (26153) panicked at src/lib.rs:9:22:
+    assertion `left == right` failed: two and two
+      left: 4
+     right: 5
+    note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+        PASS [   0.010s] (4/4) failing tests::adds
+------------
+     Summary [   0.011s] 4 tests run: 1 passed, 3 failed, 0 skipped
+        FAIL [   0.009s] (1/4) failing tests::says_error
+        FAIL [   0.009s] (2/4) failing tests::unwraps
+        FAIL [   0.010s] (3/4) failing tests::wrong_sum
+error: test run failed

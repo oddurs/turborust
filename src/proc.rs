@@ -287,6 +287,8 @@ pub fn spawn(
     spawn_with(name, cmd, cwd, env, false, events)
 }
 
+const NEXTEST_PROGRESS: &str = "NEXTEST_SHOW_PROGRESS";
+
 /// Spawns `cmd` on a pty, optionally with the ambient environment removed.
 ///
 /// `isolated` is how strict env mode is enforced: the child is given exactly the
@@ -345,6 +347,14 @@ pub fn spawn_with(
     builder.env("CLICOLOR_FORCE", "1");
     builder.env("TURBORUST", "1");
     builder.env("TURBORUST_PROC", name);
+    // nextest's progress bar redraws in place, and a log does not: on a pty its
+    // lines arrive run together, and no failure can be read out of them. The
+    // counter keeps a line per test. Only a default; a choice made is kept.
+    let chosen = env.contains_key(NEXTEST_PROGRESS)
+        || (!isolated && std::env::var_os(NEXTEST_PROGRESS).is_some());
+    if !chosen {
+        builder.env(NEXTEST_PROGRESS, "counter");
+    }
 
     // The reader starts BEFORE the child, and the child is not spawned until the
     // reader thread is actually running. A command that writes and exits
@@ -1170,6 +1180,44 @@ mod tests {
         assert!(saw_line, "expected to capture child stdout");
         assert_eq!(code, Some(3));
         let _ = h.stop(Duration::from_millis(100)).await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn nextest_is_told_to_count_unless_told_otherwise() {
+        async fn progress(env: &[(&str, &str)]) -> String {
+            let env = env
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            // Isolated, so the environment running this test cannot answer.
+            let h = spawn_with(
+                "t",
+                "echo \"progress=$NEXTEST_SHOW_PROGRESS.\"",
+                Path::new("."),
+                &env,
+                true,
+                tx,
+            )
+            .unwrap();
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            let mut said = String::new();
+            while tokio::time::Instant::now() < deadline && !said.contains('.') {
+                if let Ok(Some(ProcEvent::Line(l))) =
+                    tokio::time::timeout(Duration::from_millis(200), rx.recv()).await
+                {
+                    said = strip_ansi(&l.text).into_owned();
+                }
+            }
+            let _ = h.stop(Duration::from_millis(100)).await;
+            said
+        }
+        assert_eq!(progress(&[]).await, "progress=counter.");
+        assert_eq!(
+            progress(&[("NEXTEST_SHOW_PROGRESS", "bar")]).await,
+            "progress=bar."
+        );
     }
 
     // Unix only until someone can debug pty capture on Windows directly: both
