@@ -2,7 +2,7 @@
 id: 62
 title: pty output capture is unverified on Windows
 type: bug
-status: doing
+status: done
 milestone: later
 created: 2026-09-08
 updated: 2026-10-29
@@ -73,7 +73,7 @@ Candidates worth checking first:
 - [x] The cause is identified rather than worked around
 - [x] Both tests run and pass on windows-latest
 - [x] The `#[cfg(unix)]` gates are removed
-- [ ] A configurable shell makes the integration fixtures portable
+- [x] A configurable shell makes the integration fixtures portable
 
 ## 2026-10-28
 
@@ -89,3 +89,10 @@ Confirmed on `windows-latest` (#52's CI): `captures_child_output_and_exit_code`,
 
 
 The configurable shell: `[project] shell`, or `shell` on a service or task. A name gets the flag that shell takes a command with (`-c`; `-Command` for pwsh and powershell; `/C` for cmd). An array is an exact argv with the command appended last. The shell is folded into the cache key only when one is set, so every existing key still hits, but the same text under another shell is another key. mise's `run_windows` (above) is covered by a per-node `shell` for most cases; a per-platform command was not added. What is left on this item is the last criterion, the integration fixtures running on Windows through the shell, tried separately because that is CI iteration and this is not.
+
+The integration suite, through the shell: `tests/run_path.rs` now runs on `windows-latest` with Git Bash as its fixtures' shell. The first run passed 20 of 25. Four failures were the fixtures' own: the sandbox's canonical path is `\\?\C:\...`, and its backslashes are invalid escapes inside the TOML strings the fixtures build. Paths are now forward-slashed with no verbatim prefix, which Git Bash reads the same.
+
+The fifth was a real bug, and the reason this was worth trying: **a stop on Windows asked the child for nothing.** Unix sends SIGTERM to the group and escalates after the grace; Windows had no polite step, so every stop waited out the whole `stop_timeout` (8s by default) and then terminated the job. A task over its timeout ran to completion meanwhile, here a `sleep 5; touch` that touched. `stop` now types Ctrl-C into the pseudoconsole first, which ConPTY delivers to its console processes as CTRL_C_EVENT, and terminates the job only when the grace runs out. With that, all 25 pass on Windows.
+
+One test stays Unix-only, deliberately: the grandchild-pid one reads a pid from the shell, and Git Bash's are MSYS pids, not Windows ones. `tests/supervisor.rs` is still Unix-gated; its fixtures lean on signals (`trap`, `kill -0`) that have no Windows meaning, which is a different problem from the shell.
+
