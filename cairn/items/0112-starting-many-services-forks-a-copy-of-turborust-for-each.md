@@ -2,7 +2,7 @@
 id: 112
 title: Starting many services forks a copy of turborust for each
 type: feature
-status: backlog
+status: done
 created: 2026-10-29
 updated: 2026-10-29
 milestone: later
@@ -38,5 +38,39 @@ closing. macOS and Windows keep the current path.
 ## Acceptance criteria
 
 - [ ] Fifty services start in no more than hivemind's time on the same machine
-- [ ] `connect`, resize, ctrl-c passthrough and group signalling still work on Linux
-- [ ] The integration suite passes unchanged
+- [x] `connect`, resize, ctrl-c passthrough and group signalling still work on Linux
+- [x] The integration suite passes unchanged
+
+## Notes
+
+Done as planned: `proc::fast_spawn` starts `/bin/sh` with `posix_spawn`,
+`POSIX_SPAWN_SETSID`, every signal back to its default and an empty mask, a
+`chdir` file action, and the pty's slave opened by path as fd 0 and duplicated
+onto 1 and 2. The environment is the `CommandBuilder`'s, listed through
+`iter_full_env_as_str` with `SHELL` from `get_shell`, exactly as portable_pty
+would set it. The child is a small `portable_pty::Child` over `waitpid`, which
+reports a signal death the way portable_pty does (code 1, named). Anything it
+cannot reproduce exactly — no tty name, a relative program, an environment
+variable that is not UTF-8 — returns `Unsupported` and portable_pty spawns it
+instead. macOS and Windows are unchanged.
+
+There were no tests of what the pty is for, so three were added, and they pass
+on either path: ctrl-c written to the pty reaches the child as SIGINT, a
+resize reaches it as SIGWINCH, and the child leads its own session with the pty
+as its terminal. Dropping `POSIX_SPAWN_SETSID` fails all three. A fourth checks
+that the fast path is actually taken.
+
+Measured with `bench/compare.py lifecycle` (median of 7): ten services 40ms →
+26ms, fifty 176ms → 112ms, against hivemind's 19ms and 99ms. The first
+criterion is not met. What is left is not the spawn: raising `concurrency` from
+4 to 64 changes nothing, and fifty shells each starting a `touch` on four CPUs
+is most of both tools' time. The remainder, about a quarter of a millisecond a
+child, is turborust's own per-node work — a pty reader thread, a pidfd, state
+and history — which is not worth trading away for it.
+
+`group_alive` now asks `killpg(pgid, 0)` first: no member at all is the usual
+answer after a stop, and a `/proc` scan per stop had pushed stopping fifty
+services from 16ms to 30ms. Back to 14ms.
+
+A durability soak of the whole suite with this in (4 workers × 25 rounds, 900
+test-binary runs) had no failures.

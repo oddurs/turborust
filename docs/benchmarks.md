@@ -55,7 +55,8 @@ closed or written down (cairn 0111):
 | | before | after |
 |---|---|---|
 | start, 1 service | 74 ms | 10 ms |
-| start, 50 services | 252 ms | 177 ms |
+| start, 10 services | 98 ms | 26 ms |
+| start, 50 services | 252 ms | 112 ms |
 | stop, 50 services | 1335 ms | 16 ms |
 | idle CPU, 50 services | 10.6% | 0.0% |
 | memory after a 64 MiB line | 75 MB | 25 MB |
@@ -66,6 +67,8 @@ closed or written down (cairn 0111):
 - **Start.** `rustc -V` (over 100ms through rustup's proxy) and `git rev-parse`
   ran before anything started. The toolchain is now probed in the background
   and only a cache key waits for it, and the repository is read from `.git`.
+  On Linux a child is started with `posix_spawn` instead of a `fork` of the
+  whole process, which grew dearer with every child already running (0112).
 - **Idle CPU and stop.** Every child had a thread polling for its exit every
   20ms, and every stop polled on a timer. Exits are now notified: by a pidfd on
   Linux, by a thread blocked in `waitid` on macOS. Windows still polls. Shutdown stops each wave of
@@ -101,7 +104,7 @@ closed or written down (cairn 0111):
 
 | tool | start | stop | idle CPU | memory (PSS) | left running |
 |---|---|---|---|---|---|
-| turborust | 10 ms | 5.0 ms | 0.0% | 7.2 MB | 0 |
+| turborust | 10 ms | 3.4 ms | 0.0% | 7.3 MB | 0 |
 | process-compose | 74 ms | 10 ms | 0.0% | 52.8 MB | 0 |
 | overmind | 35 ms | 1187 ms | 0.4% | 10.5 MB | 0 |
 | hivemind | 8.3 ms | 3.0 ms | 0.0% | 4.5 MB | 0 |
@@ -112,7 +115,7 @@ closed or written down (cairn 0111):
 
 | tool | start | stop | idle CPU | memory (PSS) | left running |
 |---|---|---|---|---|---|
-| turborust | 38 ms | 5.3 ms | 0.0% | 8.2 MB | 0 |
+| turborust | 26 ms | 5.5 ms | 0.0% | 8.3 MB | 0 |
 | process-compose | 86 ms | 10 ms | 0.0% | 53.9 MB | 0 |
 | overmind | 66 ms | 1154 ms | 0.4% | 10.6 MB | 0 |
 | hivemind | 19 ms | 3.0 ms | 0.0% | 5.4 MB | 0 |
@@ -123,7 +126,7 @@ closed or written down (cairn 0111):
 
 | tool | start | stop | idle CPU | memory (PSS) | left running |
 |---|---|---|---|---|---|
-| turborust | 177 ms | 16 ms | 0.0% | 11.2 MB | 0 |
+| turborust | 112 ms | 14 ms | 0.0% | 11.6 MB | 0 |
 | process-compose | 184 ms | 12 ms | 0.0% | 57.0 MB | 0 |
 | overmind | 205 ms | 1313 ms | 0.8% | 11.7 MB | 0 |
 | hivemind | 94 ms | 7.7 ms | 0.0% | 8.4 MB | 0 |
@@ -223,10 +226,11 @@ closed or written down (cairn 0111):
 - **Output.** turborust drains a flood of output fastest, though it spends
   more CPU per line than hivemind: it also keeps the lines, parses compiler
   diagnostics out of them and feeds the dashboard.
-- **Starting many services.** hivemind is still faster at ten and fifty. Go
-  starts processes with a `vfork`-style clone, while turborust's pty library
-  forks a full copy of the process for each child. A `posix_spawn` path for
-  Linux is cairn 0112.
+- **Starting many services.** hivemind is still a little faster at ten and
+  fifty. On Linux turborust starts children with `posix_spawn`, which, like Go,
+  copies nothing of the parent (cairn 0112); most of what remains at fifty is
+  the workload itself, fifty shells each starting a `touch` on four CPUs. On
+  macOS turborust still forks.
 - **Recovering from a crash storm.** process-compose was configured to restart
   with no backoff. turborust doubles its backoff on consecutive crashes, up to
   `backoff_max` (30s by default), so a service killed again and again stays
