@@ -45,6 +45,17 @@ pub struct Project {
     /// `.env` files loaded into every node, before the node's own. Paths are
     /// relative to the workspace root.
     pub env_file: Option<EnvFiles>,
+    /// How the workspace is watched for changes.
+    pub watch: Option<WatchConfig>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Default)]
+#[serde(deny_unknown_fields)]
+pub struct WatchConfig {
+    /// Scan for changes at this interval instead of waiting for OS events, for
+    /// filesystems that deliver none: Docker Desktop bind mounts, WSL2's
+    /// `/mnt/c`, NFS, SMB. `turborust doctor` says when you are on one.
+    pub poll: Option<String>,
 }
 
 /// Hand-written rather than derived: `#[derive(Default)]` would give `ignore` an
@@ -59,6 +70,7 @@ impl Default for Project {
             notify: false,
             concurrency: None,
             env_file: None,
+            watch: None,
         }
     }
 }
@@ -530,6 +542,16 @@ impl EnvFiles {
     }
 }
 
+/// A polling interval: a duration, and not so short that scanning the tree
+/// becomes the busiest thing on the machine.
+pub fn poll_interval(s: &str) -> Result<Duration> {
+    let d = parse_duration(s)?;
+    if d < Duration::from_millis(10) {
+        bail!("`{s}` is too short to poll at; use 10ms or more");
+    }
+    Ok(d)
+}
+
 pub fn d_probe_timeout() -> String {
     "5s".into()
 }
@@ -839,6 +861,15 @@ impl Workspace {
         }
         if names.is_empty() {
             bail!("config declares no services and no tasks");
+        }
+        if let Some(poll) = self
+            .config
+            .project
+            .watch
+            .as_ref()
+            .and_then(|w| w.poll.as_ref())
+        {
+            poll_interval(poll).map_err(|e| anyhow::anyhow!("project.watch.poll: {e}"))?;
         }
         for (name, deps) in self.edges() {
             for d in deps {
@@ -1265,6 +1296,22 @@ mod tests {
         };
         ws.validate()?;
         Ok(ws)
+    }
+
+    #[test]
+    fn a_poll_interval_is_checked_before_anything_watches() {
+        let at = |poll: &str| {
+            ws(&format!(
+                "[project]\nwatch = {{ poll = \"{poll}\" }}\n[tasks.a]\ncmd = \"true\""
+            ))
+        };
+        assert!(at("500ms").is_ok());
+        let err = at("1ms").err().unwrap().to_string();
+        assert!(
+            err.contains("project.watch.poll") && err.contains("too short"),
+            "{err}"
+        );
+        assert!(at("soon").is_err());
     }
 
     #[test]

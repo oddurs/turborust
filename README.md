@@ -360,6 +360,24 @@ versions. Then a rebuild is a state change rather than a restart:
 
 `turborust plan` marks these nodes, because their edges behave differently.
 
+### When edits are not seen
+
+Some filesystems never tell the OS watcher anything: Docker Desktop bind mounts
+on macOS and Windows, WSL2 paths under `/mnt/c`, NFS, SMB, VM shared folders.
+There the dev loop just stops rebuilding, without an error. Scan instead:
+
+```toml
+[project]
+watch = { poll = "500ms" }
+```
+
+or `turborust up --poll` for one session. Changes found by scanning go through
+the same dispatch and debounce as OS events. A file counts as changed when its
+modification time (full precision) or length changes; contents are never read.
+Scans skip `.git`, `target` and `node_modules` at any depth, as well as the
+top-level directories the native watcher never registers. `turborust doctor`
+warns when the workspace is on one of these filesystems.
+
 ## The overlay
 
 Serving a frontend injects a dev overlay into it: a crab in the corner that stays

@@ -119,6 +119,72 @@ pub fn diagnose_with(root: &Path, meta: Option<&Metadata>, split_nodes: &[String
     out
 }
 
+/// Warns when the workspace sits on a filesystem that delivers no change
+/// events, where the native watcher sees nothing and the dev loop silently stops
+/// rebuilding. `polling` is whether the config already asks for the fallback.
+pub fn check_watch_events(root: &Path, polling: bool) -> Option<Finding> {
+    if polling {
+        return None;
+    }
+    let mounts = std::fs::read_to_string("/proc/self/mountinfo").ok()?;
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let (mount, fstype) = eventless_mount(&root.to_string_lossy(), &mounts)?;
+    Some(Finding {
+        apply: None,
+        severity: Severity::Warn,
+        title: "file events may never arrive here".into(),
+        detail: format!(
+            "this workspace is on `{mount}` ({fstype}), a filesystem that does not deliver \
+             change events to the native watcher, so edits may never restart anything. \
+             Polling scans for changes instead."
+        ),
+        fix: Some("[project]\nwatch = { poll = \"500ms\" }   # or: turborust up --poll".into()),
+    })
+}
+
+/// The mount holding `path`, from `/proc/self/mountinfo`, if its filesystem is
+/// one whose changes the native watcher cannot see: network filesystems, the
+/// 9p and drvfs mounts WSL2 uses for Windows drives, and the shared folders of
+/// VMs and Docker Desktop.
+fn eventless_mount(path: &str, mountinfo: &str) -> Option<(String, String)> {
+    const EVENTLESS: [&str; 11] = [
+        "nfs",
+        "nfs4",
+        "cifs",
+        "smb3",
+        "smbfs",
+        "9p",
+        "drvfs",
+        "vboxsf",
+        "fuse.sshfs",
+        "fuse.grpcfuse",
+        "prl_fs",
+    ];
+    let mut best: Option<(String, String)> = None;
+    for line in mountinfo.lines() {
+        // `id parent major:minor root mountpoint opts [optional...] - fstype src opts`
+        let mut halves = line.splitn(2, " - ");
+        let (Some(left), Some(right)) = (halves.next(), halves.next()) else {
+            continue;
+        };
+        let Some(mount) = left.split(' ').nth(4) else {
+            continue;
+        };
+        let Some(fstype) = right.split(' ').next() else {
+            continue;
+        };
+        // mountinfo escapes spaces in paths as \040.
+        let mount = mount.replace("\\040", " ");
+        let inside = path == mount
+            || mount == "/"
+            || path.starts_with(&format!("{}/", mount.trim_end_matches('/')));
+        if inside && best.as_ref().is_none_or(|(m, _)| mount.len() >= m.len()) {
+            best = Some((mount, fstype.to_string()));
+        }
+    }
+    best.filter(|(_, fstype)| EVENTLESS.contains(&fstype.as_str()))
+}
+
 /// Reports what private target directories are costing on disk.
 fn check_split_targets(root: &Path, split_nodes: &[String]) -> Option<Finding> {
     if split_nodes.is_empty() {
@@ -443,6 +509,29 @@ fn wrap(s: &str, width: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_workspace_on_a_mount_without_events_is_recognised() {
+        let info = "\
+22 1 8:1 / / rw - ext4 /dev/sda1 rw
+40 22 0:50 / /mnt/c rw - 9p drvfs rw
+41 22 0:51 / /home/me/nfs rw - nfs4 server:/x rw
+42 41 0:52 / /home/me/nfs/local rw - ext4 /dev/sdb1 rw
+";
+        let at = |p: &str| eventless_mount(p, info).map(|(m, t)| format!("{m} {t}"));
+        assert_eq!(at("/mnt/c/Users/me/app").as_deref(), Some("/mnt/c 9p"));
+        assert_eq!(at("/home/me/nfs/app").as_deref(), Some("/home/me/nfs nfs4"));
+        // The deepest mount decides: a local disk mounted inside the share is fine.
+        assert_eq!(at("/home/me/nfs/local/app"), None);
+        assert_eq!(at("/home/me/code"), None);
+        // A prefix that is not a path boundary is not inside the mount.
+        assert_eq!(at("/mnt/cdrom/app"), None);
+    }
+
+    #[test]
+    fn configured_polling_silences_the_warning() {
+        assert!(check_watch_events(Path::new("/"), true).is_none());
+    }
+
     use super::*;
 
     #[test]
