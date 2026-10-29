@@ -143,8 +143,11 @@ impl Handle {
     /// binary alive and holding the port — the classic "address already in use"
     /// on restart.
     ///
-    /// Unix does this with process groups; Windows has no equivalent signal, so
-    /// the tree is a job object and the escalation is a single terminate.
+    /// Unix does this with process groups. On Windows the tree is a job object
+    /// and the escalation is a single terminate; the polite request first is a
+    /// Ctrl-C typed into the pseudoconsole, which ConPTY delivers to every
+    /// console process attached to it as CTRL_C_EVENT. Without it a stop asked
+    /// nothing of the child and simply waited out the grace (cairn 0062).
     pub async fn stop(&self, grace: Duration) -> Result<()> {
         self.stopped.store(true, Ordering::Release);
         #[cfg(unix)]
@@ -153,6 +156,8 @@ impl Handle {
                 libc::killpg(pid as libc::pid_t, libc::SIGTERM);
             }
         }
+        #[cfg(windows)]
+        self.write_stdin(b"\x03");
         #[cfg(unix)]
         let deadline = tokio::time::Instant::now() + grace;
         if tokio::time::timeout(grace, self.exited()).await.is_err() {

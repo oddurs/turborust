@@ -1,14 +1,7 @@
-//! Unix only, deliberately.
-//!
-//! Every fixture here is a POSIX shell snippet — `cp`, `touch`, `true`,
-//! `trap ... TERM` — and turborust spawns through `cmd /C` on Windows, where
-//! none of those exist and `trap` has no equivalent at all. Rewriting them in
-//! cmd would be a second test suite, and the shutdown-order test could not be
-//! expressed in it.
-//!
-//! The real fix is a configurable shell (`shell = "bash"`), which would make
-//! these portable and is worth having on its own merits. Tracked in 0062.
-#![cfg(unix)]
+//! Every fixture here is a POSIX shell snippet: `cp`, `touch`, `true`,
+//! `trap ... TERM`. On Windows they run through Git Bash, by way of the
+//! configurable shell (cairn 0062), rather than through `cmd /C`, where none
+//! of those exist.
 
 //! The one-shot `turborust run` path.
 //!
@@ -26,6 +19,20 @@ use turborust::engine::{self, Engine};
 use turborust::plan;
 use turborust::state::Status;
 
+/// A fixture's config, run through a POSIX shell on every platform.
+fn config(src: &str) -> Config {
+    #[allow(unused_mut)]
+    let mut c = toml::from_str::<Config>(src).expect("config parses");
+    #[cfg(windows)]
+    {
+        c.project.shell = Some(turborust::config::ShellSpec::Argv(vec![
+            r"C:\Program Files\Git\bin\bash.exe".into(),
+            "-c".into(),
+        ]));
+    }
+    c
+}
+
 struct Sandbox {
     dir: PathBuf,
 }
@@ -35,13 +42,21 @@ impl Sandbox {
         let dir = std::env::temp_dir().join(format!("turborust-run-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        Sandbox {
-            dir: dir.canonicalize().unwrap(),
-        }
+        let dir = dir.canonicalize().unwrap();
+        // Fixtures put these paths inside TOML strings and shell commands.
+        // Forward slashes and no `\\?\` prefix mean the same to Git Bash and
+        // need no escaping in either.
+        #[cfg(windows)]
+        let dir = PathBuf::from(
+            dir.to_string_lossy()
+                .trim_start_matches(r"\\?\")
+                .replace('\\', "/"),
+        );
+        Sandbox { dir }
     }
 
     fn path(&self, name: &str) -> PathBuf {
-        self.dir.join(name)
+        PathBuf::from(format!("{}/{name}", self.dir.display()))
     }
 }
 
@@ -55,7 +70,7 @@ impl Drop for Sandbox {
 async fn run(sandbox: &Sandbox, toml_src: &str, targets: &[&str]) -> (i32, Arc<Engine>) {
     let ws = Workspace {
         root: sandbox.dir.clone(),
-        config: toml::from_str::<Config>(toml_src).expect("config parses"),
+        config: config(toml_src),
         source: Some(toml_src.to_string()),
     };
     let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
@@ -370,7 +385,7 @@ async fn narrowing_outputs_is_a_miss() {
 async fn run_shared(sandbox: &Sandbox, toml_src: &str, targets: &[&str]) -> i32 {
     let ws = Workspace {
         root: sandbox.dir.clone(),
-        config: toml::from_str::<Config>(toml_src).expect("config parses"),
+        config: config(toml_src),
         source: Some(toml_src.to_string()),
     };
     let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
@@ -486,7 +501,7 @@ fn copy_dir(from: &Path, to: &Path) {
 async fn run_continue(sandbox: &Sandbox, toml_src: &str, targets: &[&str]) -> i32 {
     let ws = Workspace {
         root: sandbox.dir.clone(),
-        config: toml::from_str::<Config>(toml_src).expect("config parses"),
+        config: config(toml_src),
         source: Some(toml_src.to_string()),
     };
     let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
@@ -713,7 +728,7 @@ async fn an_upstream_with_no_declared_outputs_still_invalidates_by_key() {
 async fn run_verifying(sandbox: &Sandbox, toml_src: &str, targets: &[&str]) -> i32 {
     let ws = Workspace {
         root: sandbox.dir.clone(),
-        config: toml::from_str::<Config>(toml_src).expect("config parses"),
+        config: config(toml_src),
         source: Some(toml_src.to_string()),
     };
     let targets: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
@@ -789,6 +804,7 @@ fn log_text(engine: &Engine) -> String {
         .join("\n")
 }
 
+#[cfg(unix)]
 /// Running, as opposed to gone or a zombie waiting for a parent to reap it —
 /// which, once orphaned, depends on whatever PID 1 is in the container.
 fn alive(pid: i32) -> bool {
@@ -804,6 +820,9 @@ fn alive(pid: i32) -> bool {
     }
 }
 
+// Reads the grandchild's pid from the shell, which is an MSYS pid under Git
+// Bash, not a Windows one.
+#[cfg(unix)]
 #[tokio::test]
 async fn a_task_over_its_timeout_is_stopped_tree_and_all() {
     // Cover for cairn 0095: a task that hangs used to hold the run until
