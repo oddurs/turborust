@@ -2,11 +2,11 @@
 id: 73
 title: A node that reloads itself is invisible to the supervision tree
 type: feature
-status: doing
+status: done
 milestone: v1.4
 claimed: 2026-10-28
 created: 2026-09-10
-updated: 2026-10-28
+updated: 2026-10-29
 priority: p0
 effort: l
 area: engine
@@ -67,7 +67,7 @@ without owning any of the patching — which nothing else does.
 - [x] Failing to return to ready within `ready_timeout` is reported as a failed
       reload, not as a healthy node
 - [x] Diagnostics from a self-reloading node reach the overlay's Issues panel
-- [ ] A worked `dx serve` example in the README, verified against a real project
+- [x] A worked `dx serve` example in the README, verified against a real project
 - [x] `plan` marks self-reloading nodes, since their edges behave differently
 
 ## 2026-10-28
@@ -92,3 +92,17 @@ A third bug was found in review of this change, before it shipped: a rebuild ann
 Tests: four plan-validation cases (`reloading` without `reload = "self"`, an `on_change` that would be ignored, `reloading` without a log probe to end it, and the happy path), seven supervisor cases against a shell stand-in for `dx serve`, and the `run` hang. Every new mechanism was removed in turn and the suite re-run; each removal is caught by the test written for it. Stable across repeated runs and under three concurrent copies of the suite.
 
 Open: the README example is written but not verified against a real `dx serve`, `cargo leptos watch` or `trunk serve` — none were available. It tells the reader to copy the ready and rebuild lines from their own tool's output rather than quoting strings this change has not seen. That criterion stays unticked until someone runs it.
+
+## 2026-10-29
+
+Verified against `dx` 0.7.10 serving a Dioxus 0.7.10 web app, with a dependent `e2e` service, under `turborust up`. The README example is the config that ran.
+
+What the real tool did, which the shell stand-ins had not predicted:
+
+- **No rebuild-start line, in any mode.** Not by default, not with `--verbose`, not with `--json-output`. dx announces only how a rebuild ended: "Build completed in 4.32s". The spec assumed a start line. It works anyway because `reloading` and `health` can match the same line: the pump checks the reload pattern first, so a line that is both reads as a rebuild that has already finished. Dependents still re-run, and there is no window where the node shows as rebuilding, which is the most a tool can show if it never says it started.
+- **A failed build read healthy, which is the very hole this item exists to close.** dx passes rustc's message through without its location ("ERROR mismatched types"; `--verbose` adds cargo's own lines, still with no `-->`), so nothing became a diagnostic, and the "Build failed" line matched no pattern. Added `reloading.failed`: a substring that makes the node unhealthy at once, until the next ready line. Chosen over teaching `diag` dx's `ERROR` lines, because that would be one tool's log format inside the parser every node uses, and Issues would still have no location to show.
+- **`--interactive false` is required.** Every service runs on a pty, and dx draws its full-screen interface on one.
+
+A second bug surfaced while adding `failed`, before it shipped: going unhealthy from ready, the next poll's settle step saw the ready line from *before* the failure (`ready_matches > ready_matches_at_reload`, since dx's one line bumps both) and flipped the node straight back to healthy. "Ready again" now also requires that no failure has been seen since the latest ready line. Pinned in both `a_rebuild_that_says_it_failed_is_unhealthy_until_one_succeeds` (lifecycle) and `a_rebuild_that_only_says_how_it_ended_is_followed_both_ways` (supervisor, shaped like dx); removing the condition fails both.
+
+Not done: `failed` is only read while running. A first build that fails is still decided by `ready_timeout`, as for any service whose readiness probe never passes; for dx that means up to the 10m the example sets. Also not verified: `cargo leptos watch` and `trunk serve`, which were not available here.

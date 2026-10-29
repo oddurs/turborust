@@ -96,7 +96,14 @@ reloading = { log = "<rebuild line>" }
 
 A rebuild takes it out of ready and tells its dependents, as a restart would; the
 ready line brings it back. A rustc error makes it unhealthy at once, with the
-error in the overlay.
+error in the overlay, and so does a line matching `reloading.failed`, for a tool
+that reports failure in its own words. For `dx serve`:
+
+```
+cmd       = "dx serve --platform web --open false --interactive false"
+health    = { log = "Build completed" }
+reloading = { log = "Build completed in", failed = "Build failed" }
+```
 
 On a filesystem that delivers no change events (Docker bind mounts, WSL2's
 `/mnt/c`, NFS, SMB), `[project] watch = { poll = "500ms" }` or `up --poll` scans

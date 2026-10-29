@@ -53,6 +53,8 @@ pub struct Node {
     pub reload: Reload,
     /// Output marking the start of a rebuild, for `reload = "self"`.
     pub reloading: Option<String>,
+    /// Output marking a rebuild that failed, for `reload = "self"`.
+    pub reload_failed: Option<String>,
     /// Checked while running; see `config::Liveness`.
     pub liveness: Option<Liveness>,
     pub port: Option<u16>,
@@ -400,6 +402,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             signal: s.signal.as_deref().map(parse_signal).transpose()?,
             reload: s.reload,
             reloading: s.reloading.as_ref().map(|r| r.log.clone()),
+            reload_failed: s.reloading.as_ref().and_then(|r| r.failed.clone()),
             liveness: s
                 .liveness
                 .as_ref()
@@ -498,6 +501,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
         signal: None,
         reload: Reload::Restart,
         reloading: None,
+        reload_failed: None,
         liveness: None,
         port: None,
         health: None,
