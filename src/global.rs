@@ -271,6 +271,9 @@ mod tests {
         assert_ne!(a.meta(), b.meta());
     }
 
+    /// `rustc` as the platform names it.
+    const RUSTC: &str = if cfg!(windows) { "rustc.exe" } else { "rustc" };
+
     /// A fake installation: a `rustc` first on PATH, and a rustup home with
     /// settings and one toolchain.
     struct Fake {
@@ -285,14 +288,14 @@ mod tests {
             for d in ["bin", "rustup/toolchains/stable/bin", "work/sub"] {
                 std::fs::create_dir_all(dir.join(d)).unwrap();
             }
-            std::fs::write(dir.join("bin/rustc"), b"\x7fELF proxy").unwrap();
+            std::fs::write(dir.join("bin").join(RUSTC), b"\x7fELF proxy").unwrap();
             std::fs::write(
                 dir.join("rustup/settings.toml"),
                 "default_toolchain = \"stable\"\n",
             )
             .unwrap();
             std::fs::write(
-                dir.join("rustup/toolchains/stable/bin/rustc"),
+                dir.join("rustup/toolchains/stable/bin").join(RUSTC),
                 b"\x7fELF 1.0",
             )
             .unwrap();
@@ -346,7 +349,7 @@ mod tests {
 
         // `rustup update` replaces the toolchain's rustc.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let bin = f.dir.join("rustup/toolchains/stable/bin/rustc");
+        let bin = f.dir.join("rustup/toolchains/stable/bin").join(RUSTC);
         std::fs::remove_file(&bin).unwrap();
         std::fs::write(&bin, b"\x7fELF 1.1").unwrap();
         assert_ne!(f.key(None).unwrap(), defaulted, "an updated toolchain");
@@ -357,7 +360,7 @@ mod tests {
         let f = Fake::new("opaque");
         // A version manager's shim script picks a toolchain from its own files.
         std::fs::write(
-            f.dir.join("bin/rustc"),
+            f.dir.join("bin").join(RUSTC),
             "#!/bin/sh\nexec asdf exec rustc \"$@\"\n",
         )
         .unwrap();
