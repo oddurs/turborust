@@ -17,6 +17,7 @@ pub mod output;
 pub mod overlay;
 pub mod plan;
 pub mod proc;
+pub mod procfile;
 pub mod proxy;
 pub mod serve;
 pub mod signals;

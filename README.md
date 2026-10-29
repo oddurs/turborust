@@ -60,7 +60,7 @@ turborust why <task>        why would this run — or not — right now
 turborust doctor            what is costing you seconds on every rebuild
 turborust plan              the resolved graph, with derived globs
 turborust connect <node>    attach this terminal to a running process
-turborust init              scaffold a config from your Cargo workspace
+turborust init              scaffold a config from your Cargo workspace and Procfile
 turborust schema            JSON Schema for turborust.toml, for editor completion
 turborust completions <sh>  shell completion script
 turborust man               the man page
@@ -120,6 +120,17 @@ serve = { dir = "dist", port = 8789 }   # hosted in-process, with live reload
 `run` and `up` share one supervision tree, so `depends_on` means the same thing in
 both: a task waits for its service dependencies to pass their readiness probes,
 and `run` stops whatever it started in reverse dependency order before exiting.
+
+### Coming from foreman, overmind or honcho
+
+`turborust init` next to a `Procfile` turns each `name: command` line into a
+service that runs the same command, alongside whatever it infers from the cargo
+workspace. A process whose command reads `$PORT` gets the port foreman would
+have given it (5000, 5100, …) as `env` and as its readiness probe. A `.env`
+beside the Procfile becomes `env_file`. Lines it cannot translate are named, not
+dropped: `release`, which Heroku runs once per deploy, a duplicate name, or a
+line that is not `name: command`. Then add `watch`, `depends_on` and `health`,
+which a Procfile has no way to say.
 
 ### Serving beyond localhost
 

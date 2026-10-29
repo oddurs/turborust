@@ -1090,6 +1090,9 @@ async fn a_service_that_stops_answering_goes_down_and_comes_back() {
         r#"
         [services.api]
         cmd = "touch alive; sleep 30"
+        # Without a readiness probe it is healthy the moment it spawns, before
+        # the shell has created the file the test then removes.
+        health = { cmd = "test -f alive", interval = "20ms" }
         liveness = { cmd = "test -f alive", every = "100ms", failures = 3 }
         restart = "never"
 

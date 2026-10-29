@@ -20,7 +20,7 @@ description: "Install turborust, write a config, and understand what it does."
 ```
 cargo install --locked --git https://github.com/oddurs/turborust
 cd your-workspace
-turborust init          # infers a starting config from your cargo workspace
+turborust init          # infers a starting config from your cargo workspace and Procfile
 turborust plan          # see what it resolved to
 turborust up            # start it
 ```
