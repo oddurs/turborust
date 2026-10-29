@@ -200,6 +200,24 @@ async fn history(
 /// Polling the shared state and de-duplicating the serialized frame is simpler
 /// and more robust than threading a change-notification channel through every
 /// supervisor — and at 250ms an idle page sends nothing at all.
+/// The session's history, newest last (cairn 0110). Read-only, like the state
+/// stream beside it.
+async fn history(
+    State(st): State<Arc<ServeState>>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Response {
+    let limit = q
+        .get("limit")
+        .and_then(|l| l.parse().ok())
+        .unwrap_or(200usize)
+        .min(10_000);
+    let entries = {
+        let app = st.app.lock().unwrap();
+        app.history.recent(q.get("node").map(String::as_str), limit)
+    };
+    axum::Json(entries).into_response()
+}
+
 async fn state_stream(State(st): State<Arc<ServeState>>) -> impl IntoResponse {
     let app = st.app.clone();
     let mut last = String::new();
