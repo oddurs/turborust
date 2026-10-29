@@ -6,9 +6,14 @@
 //! process *while we are trying to exit*. Save a file and hit ctrl-c and that is
 //! the path taken.
 //!
-//! Three priorities fix it, and one extra rule matters as much as the ordering:
+//! Two priorities fix it, and one extra rule matters as much as the ordering:
 //! once a stop is in flight the normal queue is closed entirely, so nothing can
-//! get in front of a shutdown already under way. The shape is modelled on
+//! get in front of a shutdown already under way.
+//!
+//! Dependency changes are not messages. They used to be (`DepUp`/`DepDown`, at
+//! a priority between these two), and a stream of edges can drop one (cairn
+//! 0101); dependents now read their dependencies' status from the engine's
+//! board instead (0104), so this queue carries only what someone asked for. The shape is modelled on
 //! watchexec's supervisor (Apache-2.0), which in turn borrows it from
 //! `systemctl`; the implementation here is our own.
 
@@ -18,13 +23,9 @@ use tokio::sync::mpsc;
 
 #[derive(Debug, Clone)]
 pub enum Ctl {
-    /// Something this node watches changed on disk. Lowest priority: a rebuild
-    /// is never more urgent than a dependency edge or a shutdown.
+    /// Something this node watches changed on disk, or someone asked for a
+    /// restart. Never more urgent than a shutdown.
     Restart(String),
-    /// A dependency stopped being ready.
-    DepDown(String),
-    /// A dependency became ready again.
-    DepUp(String),
     /// Shut this node down. Outranks everything.
     Stop,
 }
@@ -33,7 +34,6 @@ impl Ctl {
     fn priority(&self) -> Priority {
         match self {
             Ctl::Stop => Priority::Urgent,
-            Ctl::DepUp(_) | Ctl::DepDown(_) => Priority::High,
             Ctl::Restart(_) => Priority::Normal,
         }
     }
@@ -42,14 +42,12 @@ impl Ctl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Priority {
     Normal,
-    High,
     Urgent,
 }
 
 #[derive(Debug, Clone)]
 pub struct Sender {
     urgent: mpsc::UnboundedSender<Ctl>,
-    high: mpsc::UnboundedSender<Ctl>,
     normal: mpsc::UnboundedSender<Ctl>,
     stopping: Arc<AtomicBool>,
 }
@@ -69,13 +67,10 @@ impl Sender {
             self.stopping.store(true, Ordering::SeqCst);
             return ok;
         }
-        if self.stopping.load(Ordering::SeqCst) && priority == Priority::Normal {
+        if self.stopping.load(Ordering::SeqCst) {
             return false;
         }
-        match priority {
-            Priority::High => self.high.send(msg).is_ok(),
-            _ => self.normal.send(msg).is_ok(),
-        }
+        self.normal.send(msg).is_ok()
     }
 
     pub fn is_stopping(&self) -> bool {
@@ -86,7 +81,6 @@ impl Sender {
 #[derive(Debug)]
 pub struct Receiver {
     urgent: mpsc::UnboundedReceiver<Ctl>,
-    high: mpsc::UnboundedReceiver<Ctl>,
     normal: mpsc::UnboundedReceiver<Ctl>,
     stopping: Arc<AtomicBool>,
 }
@@ -98,9 +92,6 @@ impl Receiver {
         if let Ok(msg) = self.urgent.try_recv() {
             return Some(msg);
         }
-        if let Ok(msg) = self.high.try_recv() {
-            return Some(msg);
-        }
         if !self.stopping.load(Ordering::SeqCst)
             && let Ok(msg) = self.normal.try_recv()
         {
@@ -108,14 +99,10 @@ impl Receiver {
         }
 
         if self.stopping.load(Ordering::SeqCst) {
-            tokio::select! {
-                msg = self.urgent.recv() => msg,
-                msg = self.high.recv() => msg,
-            }
+            self.urgent.recv().await
         } else {
             tokio::select! {
                 msg = self.urgent.recv() => msg,
-                msg = self.high.recv() => msg,
                 msg = self.normal.recv() => msg,
             }
         }
@@ -131,7 +118,6 @@ impl Receiver {
                 saw_stop = true;
             }
         }
-        while self.high.try_recv().is_ok() {}
         while self.normal.try_recv().is_ok() {}
         saw_stop || self.is_stopping()
     }
@@ -143,19 +129,16 @@ impl Receiver {
 
 pub fn channel() -> (Sender, Receiver) {
     let (ut, ur) = mpsc::unbounded_channel();
-    let (ht, hr) = mpsc::unbounded_channel();
     let (nt, nr) = mpsc::unbounded_channel();
     let stopping = Arc::new(AtomicBool::new(false));
     (
         Sender {
             urgent: ut,
-            high: ht,
             normal: nt,
             stopping: stopping.clone(),
         },
         Receiver {
             urgent: ur,
-            high: hr,
             normal: nr,
             stopping,
         },
@@ -178,15 +161,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dependency_edges_outrank_restarts() {
-        let (tx, mut rx) = channel();
-        tx.send(Ctl::Restart("a.rs".into()));
-        tx.send(Ctl::DepDown("check".into()));
-        assert!(matches!(rx.recv().await, Some(Ctl::DepDown(_))));
-        assert!(matches!(rx.recv().await, Some(Ctl::Restart(_))));
-    }
-
-    #[tokio::test]
     async fn restarts_are_refused_once_stopping() {
         let (tx, mut rx) = channel();
         tx.send(Ctl::Stop);
@@ -202,17 +176,6 @@ mod tests {
                 .is_err(),
             "queue should be quiet after a stop"
         );
-    }
-
-    #[tokio::test]
-    async fn dependency_edges_still_flow_during_shutdown() {
-        // A dependency going down while stopping is real information: it tells a
-        // node its child may already be gone. Only restarts are suppressed.
-        let (tx, mut rx) = channel();
-        tx.send(Ctl::Stop);
-        assert!(tx.send(Ctl::DepDown("db".into())));
-        assert!(matches!(rx.recv().await, Some(Ctl::Stop)));
-        assert!(matches!(rx.recv().await, Some(Ctl::DepDown(_))));
     }
 
     #[tokio::test]

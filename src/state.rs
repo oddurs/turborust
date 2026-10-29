@@ -45,6 +45,11 @@ pub enum Status {
     Backoff(Duration),
     /// Deliberately stopped by us.
     Stopped,
+    /// Being stopped so it can start again: a restart for a change, or for a
+    /// dependency. Its own state rather than the one it is leaving, because
+    /// readiness is read from status, and a process on its way down must not
+    /// read as ready while its stop timeout runs.
+    Stopping,
 }
 
 impl Status {
@@ -67,6 +72,7 @@ impl Status {
             Status::Exited => "exited".into(),
             Status::Backoff(d) => format!("retry in {}", fmt_dur(*d)),
             Status::Stopped => "stopped".into(),
+            Status::Stopping => "stopping".into(),
         }
     }
 
@@ -86,6 +92,7 @@ impl Status {
             Status::Exited => "exited",
             Status::Backoff(_) => "backoff",
             Status::Stopped => "stopped",
+            Status::Stopping => "stopping",
         }
     }
 
@@ -94,6 +101,13 @@ impl Status {
             self,
             Status::Failed(_) | Status::Backoff(_) | Status::Unhealthy
         )
+    }
+
+    /// Whether dependents may run against this node: the one definition of
+    /// readiness. The engine publishes it from status alone, so the two cannot
+    /// disagree (cairn 0104).
+    pub fn is_ready(&self) -> bool {
+        self.is_good()
     }
 
     pub fn is_good(&self) -> bool {
@@ -147,10 +161,9 @@ pub struct NodeState {
     pub ready_matches_at_reload: u64,
     /// Bumped every time this node completes a run or becomes healthy.
     ///
-    /// Dependents compare generations rather than trusting the order of control
-    /// messages: a stale `DepUp` that arrives after a dependent already consumed
-    /// the same result finds an unchanged generation and is ignored. Racing on
-    /// message arrival is what made a task occasionally run twice.
+    /// Dependents compare generations rather than trusting edges: a node that
+    /// already ran against a result finds the generation unchanged and is not
+    /// run again, and one that missed a fast rebuild finds it moved (0101).
     pub generation: u64,
 }
 

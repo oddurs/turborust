@@ -1,11 +1,18 @@
 //! The supervisor.
 //!
-//! One tokio task per node, connected by `watch` channels carrying readiness.
-//! A node starts only once every dependency reports ready, and *stops* when any
-//! dependency stops reporting ready. That single rule gives ordered startup,
-//! ordered shutdown, and cascading restarts for free: rebuild a shared crate, its
-//! task goes not-ready, every consumer stops, the task finishes, everyone comes
-//! back in dependency order.
+//! One tokio task per node. A node starts only once every dependency is ready,
+//! *stops* when any dependency stops being ready, and restarts when a dependency
+//! produces a result newer than the one it started against. Those rules give
+//! ordered startup, ordered shutdown, and cascading restarts: rebuild a shared
+//! crate, its task goes not-ready, every consumer stops, the task finishes,
+//! everyone comes back in dependency order.
+//!
+//! The rules are level-triggered. Every status write goes through
+//! [`Engine::set`], which derives readiness from the status, bumps the node's
+//! generation on each new result, and ticks one board version. A supervisor
+//! waiting on its dependencies wakes on any tick and decides from a snapshot of
+//! their status and generations — so there is no stream of up/down messages to
+//! lose an edge from (cairn 0101, 0104).
 
 use crate::cache::{self, Cache, Fingerprint, Record};
 use crate::config::{EnvMode, OnChange, Reload, SAFE_BASE_ENV, TargetDir};
@@ -78,6 +85,9 @@ pub struct Engine {
     /// deadlock the graph the moment `concurrency` services were up and a
     /// dependent still needed a slot.
     slots: Arc<tokio::sync::Semaphore>,
+    /// Ticks on every status change. Dependents wake on it and read the board
+    /// from `state`; the value itself means nothing but "something changed".
+    board: watch::Sender<u64>,
 }
 
 impl Engine {
@@ -145,6 +155,7 @@ impl Engine {
             outcomes: Mutex::new(Vec::new()),
             changed: Mutex::new(BTreeMap::new()),
             notifier: Mutex::new(crate::notify::Notifier::new(plan_notify)),
+            board: watch::channel(0).0,
         });
         (engine, events_rx)
     }
@@ -333,8 +344,20 @@ impl Engine {
         }
     }
 
+    /// The one place a node's status is written, and so the one place its
+    /// readiness changes: readiness is `status.is_ready()`, never stored apart.
+    ///
+    /// Writing the status a node already has is a no-op — except for a new
+    /// result (`Done`, `Healthy`), which bumps the generation however it got
+    /// there. Without the no-op a node waiting on a dependency, which writes
+    /// `Waiting` and then waits for the board to tick, would wake itself
+    /// forever.
     fn set(&self, name: &str, status: Status) {
         let mut st = self.state.lock().unwrap();
+        let same = st.nodes.get(name).is_some_and(|n| n.status == status);
+        if same && !status.is_ready() {
+            return;
+        }
         // A new attempt invalidates the previous attempt's diagnostics; without
         // this a fixed error stays on screen until something else overwrites it.
         if matches!(status, Status::Running | Status::Starting)
@@ -357,11 +380,26 @@ impl Engine {
         };
         st.set(name, status);
         drop(st);
+        self.board.send_modify(|v| *v = v.wrapping_add(1));
         if let Some(failing) = health
             && let Some(notice) = self.notifier.lock().unwrap().observe(name, failing)
         {
             crate::notify::show(&notice);
         }
+    }
+
+    /// A receiver that wakes on every status change, for supervisors waiting
+    /// on their dependencies.
+    fn watch_board(&self) -> watch::Receiver<u64> {
+        self.board.subscribe()
+    }
+
+    /// The first of `deps` that is not ready, if any.
+    fn first_unready(&self, deps: &[String]) -> Option<String> {
+        let st = self.state.lock().unwrap();
+        deps.iter()
+            .find(|d| !st.nodes.get(*d).is_some_and(|n| n.status.is_ready()))
+            .cloned()
     }
 
     /// Current generation of each named node, for staleness comparison.
@@ -1068,105 +1106,40 @@ async fn wait_exit(handle: &Handle) -> i32 {
     }
 }
 
-/// Wiring for one supervised node.
+/// Wiring for one supervised node: its control queue. Readiness is not
+/// wired; it is read from status (see [`Engine::set`]).
 pub struct Wire {
     pub ctl_tx: ctl::Sender,
-    pub ready_rx: watch::Receiver<bool>,
 }
 
 /// Starts a supervisor task per node and returns their control handles.
 pub fn spawn_supervisors(engine: Arc<Engine>) -> (BTreeMap<String, Wire>, Supervisors) {
-    let order = engine.plan.order.clone();
-
-    let mut ctl: BTreeMap<String, (ctl::Sender, Option<ctl::Receiver>)> = BTreeMap::new();
-    let mut ready: BTreeMap<String, (watch::Sender<bool>, watch::Receiver<bool>)> = BTreeMap::new();
-    for name in &order {
-        let (tx, rx) = ctl::channel();
-        ctl.insert(name.clone(), (tx, Some(rx)));
-        let (rtx, rrx) = watch::channel(false);
-        ready.insert(name.clone(), (rtx, rrx));
-    }
-
     let mut wires = BTreeMap::new();
     let mut joins: Supervisors = Supervisors::new();
-    let mut helpers: Vec<tokio::task::JoinHandle<()>> = Vec::new();
-
-    for name in &order {
+    for name in &engine.plan.order {
         let node = engine.plan.get(name).expect("node in order").clone();
-        let (ctl_tx, ctl_rx) = ctl
-            .get_mut(name)
-            .map(|(t, r)| (t.clone(), r.take().unwrap()))
-            .unwrap();
-        let (ready_tx, ready_rx) = ready.get(name).cloned_pair();
-
-        // A watcher per dependency turns readiness edges into control messages,
-        // so the main loop only ever selects on two things: the child and the mail.
-        for dep in &node.depends_on {
-            let mut dep_rx = ready.get(dep).unwrap().1.clone();
-            let ctl_tx = ctl_tx.clone();
-            let dep = dep.clone();
-            helpers.push(tokio::spawn(async move {
-                while dep_rx.changed().await.is_ok() {
-                    let up = *dep_rx.borrow();
-                    let msg = if up {
-                        Ctl::DepUp(dep.clone())
-                    } else {
-                        Ctl::DepDown(dep.clone())
-                    };
-                    if !ctl_tx.send(msg) {
-                        break;
-                    }
-                }
-            }));
-        }
-
-        let dep_readers: Vec<(String, watch::Receiver<bool>)> = node
-            .depends_on
-            .iter()
-            .map(|d| (d.clone(), ready.get(d).unwrap().1.clone()))
-            .collect();
-
-        wires.insert(name.clone(), Wire { ctl_tx, ready_rx });
-
+        let (ctl_tx, ctl_rx) = ctl::channel();
+        wires.insert(name.clone(), Wire { ctl_tx });
         let engine = engine.clone();
         joins.insert(
             name.clone(),
             tokio::spawn(async move {
-                supervise(engine, node, ctl_rx, ready_tx, dep_readers).await;
+                supervise(engine, node, ctl_rx).await;
             }),
         );
     }
-
-    // Dependency monitors are detached: dropping a JoinHandle leaves the task
-    // running, and they end on their own when the readiness channels close.
-    drop(helpers);
     (wires, joins)
 }
 
-trait ClonedPair {
-    fn cloned_pair(&self) -> (watch::Sender<bool>, watch::Receiver<bool>);
-}
-impl ClonedPair for Option<&(watch::Sender<bool>, watch::Receiver<bool>)> {
-    fn cloned_pair(&self) -> (watch::Sender<bool>, watch::Receiver<bool>) {
-        let (t, r) = self.expect("channel exists");
-        (t.clone(), r.clone())
-    }
-}
-
-async fn supervise(
-    engine: Arc<Engine>,
-    node: Node,
-    mut ctl: ctl::Receiver,
-    ready: watch::Sender<bool>,
-    mut deps: Vec<(String, watch::Receiver<bool>)>,
-) {
+async fn supervise(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiver) {
     let name = node.name.clone();
+    let mut board = engine.watch_board();
     let mut backoff = node.backoff_min;
     let mut crashes = CrashCount::new(&node);
 
     loop {
         // 1. Block until every dependency is ready — while staying answerable.
-        if !wait_for_deps(&engine, &name, &mut deps, &mut ctl).await {
+        if !wait_for_deps(&engine, &node, &mut board, &mut ctl).await {
             engine.set(&name, Status::Stopped);
             return;
         }
@@ -1181,7 +1154,9 @@ async fn supervise(
         let seen = engine.generations(&node.depends_on);
 
         if node.kind == Kind::Task {
-            ready.send_replace(false);
+            // Out of ready before anything else, so dependents stop now rather
+            // than after the run — a cache hit never otherwise leaves `Done`.
+            engine.set(&name, Status::Running);
             let outcome = match engine.run_task(&name, false).await {
                 Ok(o) => o,
                 Err(e) => {
@@ -1194,12 +1169,11 @@ async fn supervise(
                     }
                 }
             };
-            ready.send_replace(outcome.code == 0);
             if outcome.code == 0 && !outcome.cached {
                 let _ = engine.reload_tx.send(RELOAD_FULL.to_string());
             }
             // A task stays put until something asks it to run again.
-            match wait_for_rerun(&engine, &node.depends_on, &seen, &mut ctl).await {
+            match wait_for_rerun(&engine, &node.depends_on, &seen, &mut board, &mut ctl).await {
                 Some(reason) => {
                     if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
                         n.reason = Some(reason);
@@ -1226,8 +1200,7 @@ async fn supervise(
         // 3. Spawn (or, for a pure `serve` node, mark ready — it is hosted in-process).
         let Some(cmd) = node.cmd.clone() else {
             engine.set(&name, Status::Healthy);
-            ready.send_replace(true);
-            match wait_for_rerun(&engine, &node.depends_on, &seen, &mut ctl).await {
+            match wait_for_rerun(&engine, &node.depends_on, &seen, &mut board, &mut ctl).await {
                 Some(_) => continue,
                 None => return,
             }
@@ -1259,7 +1232,17 @@ async fn supervise(
                 }
                 if crashes.exhausted(Duration::ZERO) {
                     drop(slot);
-                    if !give_up(&engine, &node, &seen, &mut ctl, &mut crashes, 127).await {
+                    if !give_up(
+                        &engine,
+                        &node,
+                        &seen,
+                        &mut board,
+                        &mut ctl,
+                        &mut crashes,
+                        127,
+                    )
+                    .await
+                    {
                         return;
                     }
                     backoff = node.backoff_min;
@@ -1288,51 +1271,46 @@ async fn supervise(
                 engine.set(&name, Status::Healthy);
                 true
             }
-            Some(_) => match probe_until(&engine, &node, &handle, &mut ctl, &seen).await {
-                Ready::Yes => {
-                    engine.set(&name, Status::Healthy);
-                    backoff = node.backoff_min;
-                    true
-                }
-                Ready::No => {
-                    // Not `Starting`: nothing is starting any more, and a node
-                    // left reading that way kept a one-shot `run` waiting on it
-                    // forever.
-                    engine.log(&name, "readiness probe never passed".into());
-                    engine.set(&name, Status::Unhealthy);
-                    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
-                        n.reason = Some(format!(
-                            "not ready within {}",
-                            crate::state::fmt_dur(node.ready_timeout)
-                        ));
+            Some(_) => {
+                match probe_until(&engine, &node, &handle, &mut ctl, &mut board, &seen).await {
+                    Ready::Yes => {
+                        engine.set(&name, Status::Healthy);
+                        backoff = node.backoff_min;
+                        true
                     }
-                    false
+                    Ready::No => {
+                        // Not `Starting`: nothing is starting any more, and a node
+                        // left reading that way kept a one-shot `run` waiting on it
+                        // forever.
+                        engine.log(&name, "readiness probe never passed".into());
+                        engine.set(&name, Status::Unhealthy);
+                        if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
+                            n.reason = Some(format!(
+                                "not ready within {}",
+                                crate::state::fmt_dur(node.ready_timeout)
+                            ));
+                        }
+                        false
+                    }
+                    Ready::Stop => {
+                        engine.set(&name, Status::Stopped);
+                        // Unpublished only once it is gone: a forced stop during the grace
+                        // period finds children through the published handles (cairn 0085).
+                        let _ = handle.stop(node.stop_timeout).await;
+                        engine.forget_handle(&name);
+                        return;
+                    }
+                    Ready::Interrupted(reason) => {
+                        engine.set(&name, Status::Stopping);
+                        engine.log(&name, format!("restarting mid-startup: {reason}"));
+                        let _ = handle.stop(node.stop_timeout).await;
+                        engine.forget_handle(&name);
+                        continue;
+                    }
                 }
-                Ready::Interrupted(Ctl::Stop) => {
-                    engine.set(&name, Status::Stopped);
-                    ready.send_replace(false);
-                    // Unpublished only once it is gone: a forced stop during the grace
-                    // period finds children through the published handles (cairn 0085).
-                    let _ = handle.stop(node.stop_timeout).await;
-                    engine.forget_handle(&name);
-                    return;
-                }
-                Ready::Interrupted(other) => {
-                    let reason = match other {
-                        Ctl::Restart(r) => r,
-                        Ctl::DepDown(d) => format!("dependency `{d}` is rebuilding"),
-                        _ => "changed".into(),
-                    };
-                    engine.log(&name, format!("restarting mid-startup: {reason}"));
-                    ready.send_replace(false);
-                    let _ = handle.stop(node.stop_timeout).await;
-                    engine.forget_handle(&name);
-                    continue;
-                }
-            },
+            }
         };
         drop(slot);
-        ready.send_replace(ready_flag);
         if ready_flag {
             let _ = engine.reload_tx.send(RELOAD_FULL.to_string());
         }
@@ -1344,11 +1322,19 @@ async fn supervise(
             tokio::select! {
                 code = wait_exit(&handle) => break StopReason::Exited(code),
                 _ = tokio::time::sleep(own.poll), if own.watching => {
-                    own.step(&engine, &node, &ready).await;
+                    own.step(&engine, &node).await;
                 }
                 _ = alive.tick.tick(), if alive.enabled => {
-                    if let Some(why) = alive.check(&engine, &node, &ready).await {
+                    if let Some(why) = alive.check(&engine, &node).await {
                         break StopReason::Restart(why);
+                    }
+                }
+                changed = board.changed() => {
+                    if changed.is_err() {
+                        break StopReason::Stop;
+                    }
+                    if let Some(why) = dependency_moved(&engine, &node, &seen) {
+                        break StopReason::Dependency(why);
                     }
                 }
                 msg = ctl.recv() => match msg {
@@ -1376,24 +1362,10 @@ async fn supervise(
                         // startup left to protect.
                         OnChange::Restart | OnChange::Queue => break StopReason::Restart(r),
                     },
-                    Some(Ctl::DepDown(d)) => {
-                        break StopReason::DepDown(format!("dependency `{d}` is rebuilding"))
-                    }
-                    // Already running, so a dependency coming back is usually
-                    // the edge that started us or the tail of a DepDown we have
-                    // already acted on; restarting for those would double every
-                    // cascade. Unless its generation moved: then it produced a
-                    // result this process never saw go down for.
-                    Some(Ctl::DepUp(d)) => match missed_down(&engine, &node, &seen, &d) {
-                        Some(why) => break StopReason::DepDown(why),
-                        None => continue,
-                    },
                     Some(Ctl::Stop) | None => break StopReason::Stop,
                 },
             }
         };
-
-        ready.send_replace(false);
 
         match stop_reason {
             StopReason::Stop => {
@@ -1402,7 +1374,8 @@ async fn supervise(
                 engine.forget_handle(&name);
                 return;
             }
-            StopReason::Restart(reason) | StopReason::DepDown(reason) => {
+            StopReason::Restart(reason) | StopReason::Dependency(reason) => {
+                engine.set(&name, Status::Stopping);
                 {
                     let mut st = engine.state.lock().unwrap();
                     if let Some(n) = st.nodes.get_mut(&name) {
@@ -1434,7 +1407,9 @@ async fn supervise(
                 }
                 if !should_restart {
                     // Stay parked, but remain restartable from a watch event.
-                    match wait_for_rerun(&engine, &node.depends_on, &seen, &mut ctl).await {
+                    match wait_for_rerun(&engine, &node.depends_on, &seen, &mut board, &mut ctl)
+                        .await
+                    {
                         Some(reason) => {
                             engine.log(&name, format!("restarting: {reason}"));
                             continue;
@@ -1443,7 +1418,17 @@ async fn supervise(
                     }
                 }
                 if crashes.exhausted(started.elapsed()) {
-                    if !give_up(&engine, &node, &seen, &mut ctl, &mut crashes, code).await {
+                    if !give_up(
+                        &engine,
+                        &node,
+                        &seen,
+                        &mut board,
+                        &mut ctl,
+                        &mut crashes,
+                        code,
+                    )
+                    .await
+                    {
                         return;
                     }
                     backoff = node.backoff_min;
@@ -1520,6 +1505,7 @@ async fn give_up(
     engine: &Engine,
     node: &Node,
     seen: &[u64],
+    board: &mut watch::Receiver<u64>,
     ctl: &mut ctl::Receiver,
     crashes: &mut CrashCount,
     code: i32,
@@ -1534,7 +1520,7 @@ async fn give_up(
     if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(name) {
         n.reason = Some(why);
     }
-    match wait_for_rerun(engine, &node.depends_on, seen, ctl).await {
+    match wait_for_rerun(engine, &node.depends_on, seen, board, ctl).await {
         Some(reason) => {
             engine.log(name, format!("restarting: {reason}"));
             crashes.reset();
@@ -1547,7 +1533,7 @@ async fn give_up(
 enum StopReason {
     Exited(i32),
     Restart(String),
-    DepDown(String),
+    Dependency(String),
     Stop,
 }
 
@@ -1615,7 +1601,7 @@ impl SelfReload {
         }
     }
 
-    async fn step(&mut self, engine: &Engine, node: &Node, ready: &watch::Sender<bool>) {
+    async fn step(&mut self, engine: &Engine, node: &Node) {
         let name = node.name.as_str();
         let Some((reloads, ready_again, errors)) =
             engine.state.lock().unwrap().nodes.get(name).map(|n| {
@@ -1631,9 +1617,9 @@ impl SelfReload {
 
         if reloads != self.seen {
             self.seen = reloads;
-            // The down edge, without a restart: dependents are told exactly as
-            // they would be if this node had been stopped and started.
-            ready.send_replace(false);
+            // The down edge, without a restart: `Reloading` is not ready, so
+            // dependents see exactly what they would if this node had been
+            // stopped and started.
             engine.set(name, Status::Reloading);
             set_reason(engine, name, "rebuilding itself".into());
             self.phase = Phase::Rebuilding {
@@ -1651,7 +1637,6 @@ impl SelfReload {
         if ready_again && probes_pass {
             engine.set(name, Status::Healthy);
             set_reason(engine, name, "reloaded itself".into());
-            ready.send_replace(true);
             // Deliberately no browser reload: the process has just patched
             // itself in place, and a full reload would discard the state it
             // went to the trouble of keeping.
@@ -1718,12 +1703,7 @@ impl Liveness {
     }
 
     /// One check. `Some(reason)` asks the supervisor to restart the node.
-    async fn check(
-        &mut self,
-        engine: &Engine,
-        node: &Node,
-        ready: &watch::Sender<bool>,
-    ) -> Option<String> {
+    async fn check(&mut self, engine: &Engine, node: &Node) -> Option<String> {
         let l = node.liveness.as_ref()?;
         let name = node.name.as_str();
         // A process rebuilding itself is not expected to answer meanwhile.
@@ -1745,7 +1725,6 @@ impl Liveness {
                     engine.log(name, "answering again".into());
                     engine.set(name, Status::Healthy);
                     set_reason(engine, name, "answering again".into());
-                    ready.send_replace(true);
                 }
                 None
             }
@@ -1760,7 +1739,6 @@ impl Liveness {
                     return Some(why);
                 }
                 self.took_down = true;
-                ready.send_replace(false);
                 engine.set(name, Status::Unhealthy);
                 set_reason(engine, name, why);
                 None
@@ -1775,7 +1753,7 @@ fn set_reason(engine: &Engine, name: &str, reason: String) {
     }
 }
 
-/// Waits for every dependency to report ready. `false` means shut down instead.
+/// Waits for every dependency to be ready. `false` means shut down instead.
 ///
 /// The control queue is watched throughout. Without that, a node waiting on a
 /// dependency that will never become ready — because it failed — never sees
@@ -1783,69 +1761,89 @@ fn set_reason(engine: &Engine, name: &str, reason: String) {
 /// that is not listening. Same shape as the readiness probe in 0020.
 async fn wait_for_deps(
     engine: &Engine,
-    name: &str,
-    deps: &mut [(String, watch::Receiver<bool>)],
+    node: &Node,
+    board: &mut watch::Receiver<u64>,
     ctl: &mut ctl::Receiver,
 ) -> bool {
-    for (dep, rx) in deps.iter_mut() {
-        loop {
-            if *rx.borrow_and_update() {
-                break;
-            }
-            engine.set(name, Status::Waiting(dep.clone()));
-            tokio::select! {
-                changed = rx.changed() => {
-                    if changed.is_err() {
-                        return false;
-                    }
+    loop {
+        // Marked seen before reading, so a change made after the read — our
+        // own `Waiting` write included — wakes the wait below instead of
+        // slipping between the two.
+        board.borrow_and_update();
+        let Some(dep) = engine.first_unready(&node.depends_on) else {
+            return true;
+        };
+        engine.set(&node.name, Status::Waiting(dep));
+        tokio::select! {
+            changed = board.changed() => {
+                if changed.is_err() {
+                    return false;
                 }
-                msg = ctl.recv() => match msg {
-                    Some(Ctl::Stop) | None => return false,
-                    // Anything else is noise while we are not running.
-                    Some(_) => {}
-                },
             }
+            msg = ctl.recv() => match msg {
+                Some(Ctl::Stop) | None => return false,
+                // A restart while not running is noise: starting is what
+                // this is waiting to do anyway.
+                Some(_) => {}
+            },
         }
     }
-    true
 }
 
 /// Parks until there is genuinely something new to do. `None` means shut down.
 ///
-/// Dependency wake-ups are only acted on when a dependency's generation differs
-/// from what this node last consumed. Treating the messages themselves as the
-/// trigger meant a message that arrived a moment too late to be drained caused a
-/// second, identical run.
+/// A dependency is acted on only when its generation differs from what this
+/// node last consumed, so a node that already ran against a result is not run
+/// against it again — which is what a message arriving a moment too late to be
+/// drained used to cause.
 async fn wait_for_rerun(
     engine: &Engine,
     deps: &[String],
     seen: &[u64],
+    board: &mut watch::Receiver<u64>,
     ctl: &mut ctl::Receiver,
 ) -> Option<String> {
     loop {
-        match ctl.recv().await {
-            Some(Ctl::Restart(r)) => return Some(r),
-            Some(Ctl::DepUp(d)) | Some(Ctl::DepDown(d)) => {
-                if engine.generations(deps) != seen {
-                    return Some(format!("dependency `{d}` changed"));
+        board.borrow_and_update();
+        if let Some(d) = moved_dependency(engine, deps, seen) {
+            return Some(format!("dependency `{d}` changed"));
+        }
+        tokio::select! {
+            changed = board.changed() => {
+                if changed.is_err() {
+                    return None;
                 }
             }
-            Some(Ctl::Stop) | None => return None,
+            msg = ctl.recv() => match msg {
+                Some(Ctl::Restart(r)) => return Some(r),
+                Some(Ctl::Stop) | None => return None,
+            },
         }
     }
 }
 
-/// Whether a `DepUp` from `dep` hides a down edge this node never saw.
+/// The first dependency whose generation has moved past `seen`.
+fn moved_dependency(engine: &Engine, deps: &[String], seen: &[u64]) -> Option<String> {
+    let now = engine.generations(deps);
+    deps.iter()
+        .zip(now.iter().zip(seen))
+        .find(|(_, (now, then))| now != then)
+        .map(|(d, _)| d.clone())
+}
+
+/// Why a running node should stop for its dependencies, if it should.
 ///
-/// Readiness travels on a `watch` channel, which keeps only the latest value. A
-/// dependency that reruns in a few milliseconds goes false and back to true
-/// before its monitor task is scheduled, and the monitor then reports only
-/// "up" — which a running node rightly ignores, so the rebuild never reached it
-/// (cairn 0101). `seen` is the dependencies' generations this process was
-/// started against; a generation past it is a result the process predates.
-fn missed_down(engine: &Engine, node: &Node, seen: &[u64], dep: &str) -> Option<String> {
-    (engine.generations(&node.depends_on) != seen)
-        .then(|| format!("dependency `{dep}` produced a new result"))
+/// Two conditions, both read from the board rather than from messages: a
+/// dependency that is not ready (it is rebuilding, or gone), or one whose
+/// generation has moved past what this process started against — a result
+/// it never ran on, which a fast enough rebuild produces without ever
+/// visibly leaving ready (cairn 0101).
+fn dependency_moved(engine: &Engine, node: &Node, seen: &[u64]) -> Option<String> {
+    if let Some(d) = engine.first_unready(&node.depends_on) {
+        return Some(format!("dependency `{d}` is rebuilding"));
+    }
+    moved_dependency(engine, &node.depends_on, seen)
+        .map(|d| format!("dependency `{d}` produced a new result"))
 }
 
 /// Outcome of waiting for a node to become ready.
@@ -1853,8 +1851,10 @@ enum Ready {
     Yes,
     /// The probe never passed, or the child died first.
     No,
-    /// A control message arrived that outranks finishing startup.
-    Interrupted(Ctl),
+    /// Shutdown began.
+    Stop,
+    /// Something outranks finishing startup: a change, or a dependency.
+    Interrupted(String),
 }
 
 /// Probes until ready, giving up early if the child dies first.
@@ -1870,6 +1870,7 @@ async fn probe_until(
     node: &Node,
     handle: &Handle,
     ctl: &mut ctl::Receiver,
+    board: &mut watch::Receiver<u64>,
     seen: &[u64],
 ) -> Ready {
     let Some(h) = node.health.as_ref() else {
@@ -1912,21 +1913,29 @@ async fn probe_until(
         // Sleep, but stay answerable. `queue` is the policy that declines to be
         // interrupted here: it exists so a cold build is not killed halfway and
         // then started again from scratch.
-        tokio::select! {
-            _ = tokio::time::sleep(interval) => {}
-            msg = ctl.recv() => match msg {
-                Some(Ctl::Stop) | None => return Ready::Interrupted(Ctl::Stop),
-                Some(Ctl::Restart(r))
-                    if node.on_change == OnChange::Restart && node.reload == Reload::Restart =>
-                {
-                    return Ready::Interrupted(Ctl::Restart(r));
+        let pause = tokio::time::sleep(interval);
+        tokio::pin!(pause);
+        loop {
+            tokio::select! {
+                _ = &mut pause => break,
+                changed = board.changed() => {
+                    if changed.is_err() {
+                        return Ready::Stop;
+                    }
+                    if let Some(why) = dependency_moved(engine, node, seen) {
+                        return Ready::Interrupted(why);
+                    }
                 }
-                Some(Ctl::DepDown(d)) => return Ready::Interrupted(Ctl::DepDown(d)),
-                Some(Ctl::DepUp(d)) if missed_down(engine, node, seen, &d).is_some() => {
-                    return Ready::Interrupted(Ctl::DepDown(d));
-                }
-                Some(_) => {}
-            },
+                msg = ctl.recv() => match msg {
+                    Some(Ctl::Stop) | None => return Ready::Stop,
+                    Some(Ctl::Restart(r))
+                        if node.on_change == OnChange::Restart && node.reload == Reload::Restart =>
+                    {
+                        return Ready::Interrupted(r);
+                    }
+                    Some(_) => {}
+                },
+            }
         }
     }
 }

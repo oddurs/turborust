@@ -238,6 +238,7 @@ fn draw_sidebar(f: &mut Frame, area: Rect, st: &crate::state::AppState, engine: 
             Status::Failed(_) => ("✕", Color::Red),
             Status::Exited => ("·", Color::DarkGray),
             Status::Stopped => ("■", Color::DarkGray),
+            Status::Stopping => ("◐", Color::DarkGray),
             Status::Pending => ("·", Color::DarkGray),
         };
         let kind = engine
