@@ -114,6 +114,14 @@ enum Cmd {
         /// without asking.
         #[arg(long)]
         fix: bool,
+        /// Say where the time actually went: per task, how long it took, how
+        /// often it hit the cache, and why it missed. Read from runs logged
+        /// on this machine.
+        #[arg(long)]
+        profile: bool,
+        /// With --profile: how far back to look, e.g. 24h, 7d.
+        #[arg(long, default_value = "24h", requires = "profile")]
+        since: String,
     },
     /// Print the resolved plan without running anything.
     Plan,
@@ -202,7 +210,12 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         poll: None,
     }) {
         Cmd::Init => cmd_init(),
-        Cmd::Doctor { fix } => cmd_doctor(cli.config.as_deref(), fix),
+        Cmd::Doctor {
+            profile: true,
+            since,
+            ..
+        } => cmd_profile(cli.config.as_deref(), &since),
+        Cmd::Doctor { fix, .. } => cmd_doctor(cli.config.as_deref(), fix),
         Cmd::Plan => cmd_plan(cli.config.as_deref()),
         Cmd::Graph { format, with_cache } => cmd_graph(cli.config.as_deref(), &format, with_cache),
         Cmd::Why { target } => cmd_why(cli.config.as_deref(), &target).await,
@@ -344,6 +357,34 @@ fn shellexpand_home(path: &str) -> String {
             .unwrap_or_else(|_| path.to_string()),
         None => path.to_string(),
     }
+}
+
+/// `doctor --profile`: what the logged runs say, rather than what the
+/// configuration suggests (cairn 0075).
+fn cmd_profile(config: Option<&std::path::Path>, since: &str) -> Result<i32> {
+    let ws = load(config)?;
+    let window =
+        turborust::config::parse_duration(since).with_context(|| format!("--since {since}"))?;
+    let from = turborust::summary::now_secs().saturating_sub(window.as_secs());
+    let records = turborust::profile::Log::at(&ws.cache_dir()).load();
+    let profiles = turborust::profile::profile(&records, from);
+    println!(
+        "\n\u{1b}[1mturborust doctor --profile\u{1b}[0m  \u{1b}[2m{}\u{1b}[0m",
+        ws.root.display()
+    );
+    let timings = turborust::profile::latest_timings(&ws.root);
+    print!(
+        "{}",
+        turborust::profile::render(&profiles, &format!("last {since}"), timings.as_ref())
+    );
+    if !turborust::profile::enabled(ws.config.project.profile) {
+        println!(
+            "\n  \u{1b}[33mruns are not being logged\u{1b}[0m \u{1b}[2m(`[project] profile = false` or \
+             TURBORUST_PROFILE=off), so this will not change.\u{1b}[0m"
+        );
+    }
+    println!();
+    Ok(0)
 }
 
 fn cmd_doctor(config: Option<&std::path::Path>, fix: bool) -> Result<i32> {

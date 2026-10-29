@@ -111,6 +111,41 @@ $ turborust why check
 
 Content hashes, not mtimes — so `git checkout` does not invalidate the world.
 
+### Where the time went
+
+`doctor` reads your configuration and says what a good one looks like.
+`doctor --profile` reads what actually happened:
+
+```
+$ turborust doctor --profile --since 7d
+
+  last 7d — 41m of waiting across 3 nodes
+
+  build          19m   34 runs   cache 3/34
+      keyed on env `PROFILE`, which changed on 28 of 31 misses
+      → if `PROFILE` does not change the output, move it from `env_keys` to `pass_through_env`
+
+  check           8m   34 runs   cache 30/34
+      its sources changed on 4 of 4 misses: the cache doing its job
+
+  last cold build   94s  (target/cargo-timings/cargo-timing-….html)
+      slowest crates: serde_derive 21s, sqlx-macros 17s, syn 10s
+      final binaries (compile + link): 18s
+```
+
+- **Per task:** time, runs, hits, and the most common reason for a miss.
+- **Ranking:** tasks whose misses have a cause you can change come first, ahead
+  of ones that cost more for reasons that are expected, like edited sources.
+- **Regressions:** a task whose builds got slower than its earlier runs says
+  by how much.
+- **Cold builds:** where one went comes from the newest `cargo build --timings`
+  report under `target/`. Run that once; turborust does not start a cold build
+  by itself.
+
+Each task run is appended to `.turborust/profile/runs.jsonl`, which stays under
+4 MiB by dropping its older half. It is local and never sent anywhere. Turn it
+off with `[project] profile = false` or `TURBORUST_PROFILE=off`.
+
 ## Config
 
 ```toml
@@ -746,12 +781,10 @@ own right, not a feature.
   your build. `turborust doctor` targets that floor directly.
 - Shared caching is filesystem-based (a mount or synced folder). There is no
   HTTP cache server, and no authentication beyond the filesystem's own.
-- macOS and Linux are fully exercised. On Windows, 165 of 167 tests pass in CI;
-  the two that do not are the pty tests, which capture no child output there.
-  Windows pty behaviour — and the job-object process teardown those tests would
-  exercise — is therefore **unverified** rather than working. The integration
-  suites are Unix-gated too, because their fixtures are POSIX shell and turborust
-  spawns through `cmd /C` there; a configurable shell would fix that half (`0062`).
+- macOS and Linux are fully exercised. On Windows the unit suite runs in CI,
+  pty capture and job-object teardown included. The integration suites are
+  Unix-gated, because their fixtures are POSIX shell and turborust spawns through
+  `cmd /C` there; a configurable shell would fix that (`0062`).
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
 

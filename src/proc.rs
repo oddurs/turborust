@@ -108,8 +108,9 @@ pub struct Handle {
     /// `Sync`, and supervisors hold a `&Handle` across awaits inside `tokio::spawn`.
     master: Mutex<Box<dyn MasterPty + Send>>,
     /// The pty's input side. Taken once at spawn and held here, because
-    /// `take_writer` can only succeed once.
-    writer: Mutex<Option<Box<dyn std::io::Write + Send>>>,
+    /// `take_writer` can only succeed once. Shared with the reader, which
+    /// answers ConPTY's cursor query through it.
+    writer: Stdin,
     /// Raw output, before line splitting.
     ///
     /// The log store cannot serve an attached terminal: it holds *lines*, and a
@@ -245,11 +246,7 @@ impl Handle {
 
     /// Writes to the child's stdin. `false` if the pty is gone.
     pub fn write_stdin(&self, bytes: &[u8]) -> bool {
-        let mut guard = self.writer.lock().unwrap();
-        let Some(w) = guard.as_mut() else {
-            return false;
-        };
-        w.write_all(bytes).and_then(|()| w.flush()).is_ok()
+        write_to(&self.writer, bytes)
     }
 
     /// Tells the child its window changed, so full-screen programs redraw.
@@ -370,7 +367,13 @@ pub fn spawn_with(
         .master
         .try_clone_reader()
         .context("cloning pty reader")?;
-    let writer = pair.master.take_writer().ok();
+    let writer: Stdin = Arc::new(Mutex::new(pair.master.take_writer().ok()));
+    // Only where it is needed. ConPTY is created with
+    // PSEUDOCONSOLE_INHERIT_CURSOR, so it asks for the cursor position before
+    // rendering anything and waits for the answer: unanswered, a child's output
+    // never arrives at all (cairn 0062). A Unix pty asks nothing, and answering
+    // a child that only printed the bytes would type into its stdin.
+    let answer = cfg!(windows).then(|| writer.clone());
     let (raw, _) = broadcast::channel(RAW_BACKLOG);
     let scrollback = Arc::new(Mutex::new(VecDeque::with_capacity(SCROLLBACK_BYTES)));
     let tx = events.clone();
@@ -391,7 +394,14 @@ pub fn spawn_with(
             // A zero-capacity send blocks until the parent receives, so returning
             // from `recv` below means this thread is on the next instruction.
             let _ = ready_tx.send(());
-            pump(reader, &Arc::from(pname.as_str()), tx, raw_tx, scroll_tx)
+            pump(
+                reader,
+                &Arc::from(pname.as_str()),
+                tx,
+                raw_tx,
+                scroll_tx,
+                answer,
+            )
         })
         .context("spawning pty reader thread")?;
     let _ = ready_rx.recv();
@@ -507,7 +517,7 @@ pub fn spawn_with(
         job,
         child,
         master: Mutex::new(pair.master),
-        writer: Mutex::new(writer),
+        writer,
         raw,
         scrollback,
         exit,
@@ -894,15 +904,26 @@ fn pump(
     tx: mpsc::UnboundedSender<ProcEvent>,
     raw: broadcast::Sender<Vec<u8>>,
     scrollback: Arc<Mutex<VecDeque<u8>>>,
+    answer: Option<Stdin>,
 ) {
     let mut buf = [0u8; 8192];
     let mut pending: Vec<u8> = Vec::with_capacity(256);
+    let mut queries = CursorQueries::default();
     loop {
         let n = match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => n,
             Err(_) => break, // EIO on macOS when the child closes the slave: normal EOF
         };
+        if let Some(stdin) = &answer {
+            // An attached terminal answers for itself; two answers would be
+            // one too many.
+            for _ in 0..queries.count(&buf[..n]) {
+                if raw.receiver_count() == 0 {
+                    write_to(stdin, CURSOR_REPLY);
+                }
+            }
+        }
         // Copied only for someone attached, which is the uncommon case.
         if raw.receiver_count() > 0 {
             let _ = raw.send(buf[..n].to_vec());
@@ -952,6 +973,45 @@ fn pump(
 
 /// The longest line kept whole. Longer ones arrive as several lines.
 const MAX_LINE: usize = 64 * 1024;
+
+/// A pty's input side, shared by its handle and its reader.
+type Stdin = Arc<Mutex<Option<Box<dyn std::io::Write + Send>>>>;
+
+fn write_to(stdin: &Stdin, bytes: &[u8]) -> bool {
+    let mut guard = stdin.lock().unwrap();
+    let Some(w) = guard.as_mut() else {
+        return false;
+    };
+    w.write_all(bytes).and_then(|()| w.flush()).is_ok()
+}
+
+/// Device status report: "where is the cursor?"
+const CURSOR_QUERY: &[u8] = b"\x1b[6n";
+/// The answer a terminal gives: row 1, column 1. Where it really is does not
+/// matter to anything turborust runs, only that an answer comes.
+const CURSOR_REPLY: &[u8] = b"\x1b[1;1R";
+
+/// Counts cursor queries in a stream, including one split across two reads.
+#[derive(Default)]
+struct CursorQueries {
+    /// The end of the last chunk, in case it was the start of a query.
+    tail: Vec<u8>,
+}
+
+impl CursorQueries {
+    fn count(&mut self, chunk: &[u8]) -> usize {
+        let mut window = std::mem::take(&mut self.tail);
+        window.extend_from_slice(chunk);
+        let found = window
+            .windows(CURSOR_QUERY.len())
+            .filter(|w| *w == CURSOR_QUERY)
+            .count();
+        // One byte short of a query, so nothing counted here is counted again.
+        let keep = (CURSOR_QUERY.len() - 1).min(window.len());
+        self.tail = window[window.len() - keep..].to_vec();
+        found
+    }
+}
 
 /// The last char boundary at or before `at`, so a cut never splits a
 /// character into two replacement marks. `at` must be inside `bytes`.
@@ -1051,6 +1111,7 @@ mod tests {
             tx,
             raw,
             back,
+            None,
         );
         let mut out = Vec::new();
         while let Ok(ProcEvent::Line(l)) = rx.try_recv() {
@@ -1143,10 +1204,56 @@ mod tests {
         assert_eq!(strip_ansi("\u{1b}]0;title\u{7}body"), "body");
     }
 
-    // Unix only until someone can debug pty capture on Windows directly: both
-    // of these see no child output at all there, and blind iteration against CI
-    // has not found why. Everything else in the suite passes on Windows. See 0062.
-    #[cfg(unix)]
+    #[test]
+    fn a_cursor_query_is_found_even_split_across_reads() {
+        let mut q = CursorQueries::default();
+        assert_eq!(q.count(b"hello"), 0);
+        assert_eq!(q.count(b"a\x1b[6nb\x1b[6n"), 2);
+        assert_eq!(q.count(b"x\x1b["), 0);
+        assert_eq!(q.count(b"6ny"), 1, "split across two reads");
+        assert_eq!(q.count(b"\x1b[6"), 0);
+        assert_eq!(q.count(b"m"), 0, "a different sequence");
+        assert_eq!(q.count(b"\x1b[6n"), 1, "and not counted twice");
+        assert_eq!(q.count(b""), 0);
+    }
+
+    /// What ConPTY needs before it renders anything: the query answered, once
+    /// per query, and not at all while a terminal is attached to answer it.
+    #[test]
+    fn the_reader_answers_a_cursor_query() {
+        #[derive(Clone, Default)]
+        struct Sink(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let answered = |attached: bool| {
+            let sink = Sink::default();
+            let stdin: Stdin = Arc::new(Mutex::new(Some(Box::new(sink.clone()))));
+            let (tx, _rx) = mpsc::unbounded_channel();
+            let (raw, _) = broadcast::channel(4);
+            let _terminal = attached.then(|| raw.subscribe());
+            pump(
+                Box::new(std::io::Cursor::new(b"\x1b[6nhello\n\x1b[6n".to_vec())),
+                &"t".into(),
+                tx,
+                raw,
+                Arc::new(Mutex::new(VecDeque::new())),
+                Some(stdin),
+            );
+            sink.0.lock().unwrap().clone()
+        };
+        assert_eq!(answered(false), b"\x1b[1;1R\x1b[1;1R");
+        assert!(answered(true).is_empty());
+    }
+
+    // On Windows these once saw no child output at all: ConPTY asks for the
+    // cursor position and renders nothing until it is answered (0062).
     #[tokio::test]
     async fn captures_child_output_and_exit_code() {
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -1220,9 +1327,6 @@ mod tests {
         );
     }
 
-    // Unix only until someone can debug pty capture on Windows directly: both
-    // of these see no child output at all there, and blind iteration against CI
-    // has not found why. Everything else in the suite passes on Windows. See 0062.
     /// Spawns `cmd` and waits for each of `words` in its output, in order,
     /// running `between` after each but the last.
     #[cfg(unix)]
@@ -1428,7 +1532,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
     #[tokio::test]
     async fn stop_kills_the_whole_process_group() {
         let (tx, mut rx) = mpsc::unbounded_channel();

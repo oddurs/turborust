@@ -908,3 +908,57 @@ async fn a_command_that_exits_124_itself_is_an_ordinary_failure() {
     assert_eq!(code, 124);
     assert!(!log_text(&engine).contains("timed out"));
 }
+
+// Multi-threaded, as the binary is: the run ends on another worker while the
+// last task is still storing its result, which a single thread never shows.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn every_run_is_logged_for_the_profile_including_the_last_to_finish() {
+    // Cover for cairn 0075. Setting the last task's final status ends the run,
+    // so a record written after it was lost: the slowest task never appeared.
+    let sb = Sandbox::new("profile-log");
+    std::fs::write(sb.path("in.txt"), "1").unwrap();
+    let cfg = r#"
+        [tasks.quick]
+        cmd = "true"
+        inputs = ["in.txt"]
+
+        [tasks.slow]
+        cmd = "sleep 0.3"
+        inputs = ["in.txt"]
+
+        [tasks.broken]
+        cmd = "exit 3"
+        inputs = ["in.txt"]
+    "#;
+    run_continue(&sb, cfg, &["quick", "slow", "broken"]).await;
+    let log = turborust::profile::Log::at(&sb.path(".turborust")).load();
+    let find = |n: &str| log.iter().find(|r| r.node == n).cloned();
+    let slow = find("slow").expect("the last task to finish is logged");
+    assert!(!slow.cached && slow.ok && slow.ms >= 250, "{slow:?}");
+    assert_eq!(slow.why, ["first run"]);
+    assert!(find("quick").is_some());
+    assert!(!find("broken").expect("a failure is logged").ok);
+
+    // A second run hits, and says so.
+    run_continue(&sb, cfg, &["quick"]).await;
+    let log = turborust::profile::Log::at(&sb.path(".turborust")).load();
+    assert!(
+        log.last()
+            .is_some_and(|r| r.node == "quick" && r.cached && r.why.is_empty())
+    );
+
+    // Turned off, nothing is written.
+    let off = Sandbox::new("profile-off");
+    std::fs::write(off.path("in.txt"), "1").unwrap();
+    run(
+        &off,
+        &format!("[project]\nprofile = false\n{cfg}"),
+        &["quick"],
+    )
+    .await;
+    assert!(
+        !off.path(".turborust")
+            .join(turborust::profile::LOG)
+            .exists()
+    );
+}
