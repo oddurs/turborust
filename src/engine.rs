@@ -24,10 +24,10 @@ pub use crate::ctl::Ctl;
 /// discards all of it for the sake of a colour change.
 pub const RELOAD_FULL: &str = "full";
 pub const RELOAD_CSS: &str = "css";
-use crate::health;
+use crate::host::{Child, Host, ProbeRequest, SpawnRequest};
 use crate::lifecycle;
 use crate::plan::{Kind, Node, Plan};
-use crate::proc::{self, Handle, ProcEvent};
+use crate::proc::{self, ProcEvent};
 use crate::state::{AppState, Status};
 use anyhow::Result;
 use std::collections::BTreeMap;
@@ -64,7 +64,7 @@ pub struct Engine {
     /// Extra arguments for one named task, from `run <task> -- <args>`.
     passthrough: Mutex<Option<(String, Vec<String>)>>,
     /// Live children, so an out-of-band client can reach a node's terminal.
-    handles: Mutex<BTreeMap<String, Arc<Handle>>>,
+    handles: Mutex<BTreeMap<String, Arc<dyn Child>>>,
     /// Nodes with a terminal attached. One at a time: two clients typing into the
     /// same shell interleave into nonsense.
     attached: Mutex<std::collections::BTreeSet<String>>,
@@ -89,6 +89,8 @@ pub struct Engine {
     /// Ticks on every status change. Dependents wake on it and read the board
     /// from `state`; the value itself means nothing but "something changed".
     board: watch::Sender<u64>,
+    /// Where processes are started and probed: the real machine, or a fake.
+    host: Arc<dyn Host>,
 }
 
 impl Engine {
@@ -105,6 +107,16 @@ impl Engine {
         plan: Arc<Plan>,
         cache: Arc<Cache>,
         verify: crate::config::VerifyMode,
+    ) -> (Arc<Self>, mpsc::UnboundedReceiver<ProcEvent>) {
+        Self::with_host(plan, cache, verify, Arc::new(crate::host::Real))
+    }
+
+    /// As [`Engine::new_verifying`], starting processes through `host`.
+    pub fn with_host(
+        plan: Arc<Plan>,
+        cache: Arc<Cache>,
+        verify: crate::config::VerifyMode,
+        host: Arc<dyn Host>,
     ) -> (Arc<Self>, mpsc::UnboundedReceiver<ProcEvent>) {
         let (events_tx, events_rx) = mpsc::unbounded_channel();
         let (reload_tx, _) = broadcast::channel(64);
@@ -157,6 +169,7 @@ impl Engine {
             changed: Mutex::new(BTreeMap::new()),
             notifier: Mutex::new(crate::notify::Notifier::new(plan_notify)),
             board: watch::channel(0).0,
+            host,
         });
         (engine, events_rx)
     }
@@ -179,7 +192,7 @@ impl Engine {
     }
 
     /// Publishes a node's child so `connect` can reach it.
-    fn register_handle(&self, name: &str, handle: Arc<Handle>) {
+    fn register_handle(&self, name: &str, handle: Arc<dyn Child>) {
         self.handles
             .lock()
             .unwrap()
@@ -195,10 +208,9 @@ impl Engine {
     /// Only services used to be published, so nothing could reach a task
     /// mid-run: shutdown waited out its stop timeout and exited with the task
     /// still going, and a forced stop could not kill it (cairn 0085).
-    async fn wait_registered(&self, name: &str, handle: Handle) -> i32 {
-        let handle = Arc::new(handle);
+    async fn wait_registered(&self, name: &str, handle: Arc<dyn Child>) -> i32 {
         self.register_handle(name, handle.clone());
-        let code = wait_exit(&handle).await;
+        let code = wait_exit(handle.as_ref()).await;
         self.forget_handle(name);
         code
     }
@@ -211,17 +223,16 @@ impl Engine {
     async fn wait_limited(
         &self,
         name: &str,
-        handle: Handle,
+        handle: Arc<dyn Child>,
         limit: Duration,
         grace: Duration,
     ) -> (i32, bool) {
-        let handle = Arc::new(handle);
         self.register_handle(name, handle.clone());
         let outcome = tokio::select! {
-            code = wait_exit(&handle) => (code, false),
+            code = wait_exit(handle.as_ref()) => (code, false),
             _ = tokio::time::sleep(limit) => {
-                let _ = handle.stop(grace).await;
-                let _ = wait_exit(&handle).await;
+                handle.stop(grace).await;
+                let _ = wait_exit(handle.as_ref()).await;
                 self.fail(
                     name,
                     format!("timed out after {}; stopped", fmt_limit(limit)),
@@ -265,7 +276,7 @@ impl Engine {
     }
 
     /// The running child for `name`, if there is one.
-    pub fn handle_for(&self, name: &str) -> Option<Arc<Handle>> {
+    pub fn handle_for(&self, name: &str) -> Option<Arc<dyn Child>> {
         self.handles.lock().unwrap().get(name).cloned()
     }
 
@@ -274,26 +285,39 @@ impl Engine {
     /// One place for both callers — startup and a self-reload coming back — so
     /// they cannot disagree about what ready means.
     async fn probes_pass(&self, node: &Node, h: &crate::config::Health) -> Result<(), String> {
-        if !health::probe(h).await {
-            return Err(match (&h.tcp, &h.http) {
-                (Some(port), _) => format!("nothing answering on port {port}"),
-                (_, Some(url)) => format!("{url} not answering with 2xx/3xx"),
-                _ => "not answering".into(),
-            });
-        }
-        if let Some(cmd) = &h.cmd {
-            let timeout =
-                crate::config::parse_duration(&h.timeout).unwrap_or(Duration::from_secs(5));
-            health::exec_probe(
-                cmd,
-                &node.cwd,
-                &self.child_env(node).map_err(|e| e.to_string())?,
-                node.env_mode == EnvMode::Strict,
-                timeout,
-            )
-            .await?;
-        }
-        Ok(())
+        // The environment matters only to a command probe, and computing it
+        // reads env files, so it is not done for the others.
+        let env = match &h.cmd {
+            Some(_) => self.child_env(node).map_err(|e| e.to_string())?,
+            None => BTreeMap::new(),
+        };
+        self.host
+            .probe(ProbeRequest {
+                name: &node.name,
+                health: h,
+                cwd: &node.cwd,
+                env: &env,
+                isolated: node.env_mode == EnvMode::Strict,
+            })
+            .await
+    }
+
+    /// Starts `node`'s command as `name` through the host.
+    fn spawn(
+        &self,
+        name: &str,
+        node: &Node,
+        cmd: &str,
+        env: &BTreeMap<String, String>,
+    ) -> Result<Arc<dyn Child>> {
+        self.host.spawn(SpawnRequest {
+            name,
+            cmd,
+            cwd: &node.cwd,
+            env,
+            isolated: node.env_mode == EnvMode::Strict,
+            events: self.events_tx.clone(),
+        })
     }
 
     /// Kills every running child's whole process tree at once.
@@ -702,14 +726,7 @@ impl Engine {
         let promised = rec.output_hash.clone().unwrap_or_default();
         self.clear_outputs(node);
         let cmd = self.command_for(node);
-        let handle = proc::spawn_with(
-            name,
-            &cmd,
-            &node.cwd,
-            &self.child_env(node)?,
-            node.env_mode == EnvMode::Strict,
-            self.events_tx.clone(),
-        )?;
+        let handle = self.spawn(name, node, &cmd, &self.child_env(node)?)?;
         if self.wait_registered(name, handle).await != 0 {
             // The task cannot be re-run right now. That is a problem, but it is
             // not evidence the stored result was wrong.
@@ -862,14 +879,7 @@ impl Engine {
         let _slot = self.acquire_slot(name).await;
         self.set(name, Status::Running);
         let cmd = self.command_for(&node);
-        let handle = proc::spawn_with(
-            name,
-            &cmd,
-            &node.cwd,
-            &self.spawn_env(&node, changed_paths)?,
-            node.env_mode == EnvMode::Strict,
-            self.events_tx.clone(),
-        )?;
+        let handle = self.spawn(name, &node, &cmd, &self.spawn_env(&node, changed_paths)?)?;
         let (code, timed_out) = match node.timeout {
             None => (self.wait_registered(name, handle).await, false),
             Some(limit) => {
@@ -1139,7 +1149,7 @@ fn fmt_limit(d: Duration) -> String {
     }
 }
 
-async fn wait_exit(handle: &Handle) -> i32 {
+async fn wait_exit(handle: &dyn Child) -> i32 {
     loop {
         if let Some(code) = handle.try_exit_code() {
             return code;
@@ -1199,7 +1209,7 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
     let mut m = lifecycle::Service::new(lifecycle::ServiceConfig::from_node(&node));
     let mut board = engine.watch_board();
     let mut timers: BTreeMap<lifecycle::Timer, tokio::time::Instant> = BTreeMap::new();
-    let mut child: Option<Arc<Handle>> = None;
+    let mut child: Option<Arc<dyn Child>> = None;
     let mut slot: Option<tokio::sync::OwnedSemaphorePermit> = None;
     let mut queue: std::collections::VecDeque<Event> = [Event::Begin].into();
 
@@ -1239,12 +1249,7 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                     stop: ctl.drain_stale(),
                 }),
                 Action::ReclaimPort(port) => {
-                    if !health::wait_port_free(port, Duration::from_secs(5))
-                        .await
-                        .unwrap_or(true)
-                    {
-                        let who =
-                            health::port_holder(port).unwrap_or_else(|| "unknown process".into());
+                    if let Some(who) = engine.host.reclaim_port(port).await {
                         engine.log(
                             &name,
                             format!("port {port} still held by {who}; starting anyway"),
@@ -1264,22 +1269,12 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                     let cmd = node.cmd.clone().unwrap_or_default();
                     let spawned = engine
                         .spawn_env(&node, engine.take_changed(&name))
-                        .and_then(|env| {
-                            proc::spawn_with(
-                                &name,
-                                &cmd,
-                                &node.cwd,
-                                &env,
-                                node.env_mode == EnvMode::Strict,
-                                engine.events_tx.clone(),
-                            )
-                        });
+                        .and_then(|env| engine.spawn(&name, &node, &cmd, &env));
                     match spawned {
                         Ok(h) => {
-                            let h = Arc::new(h);
                             engine.register_handle(&name, h.clone());
                             if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
-                                n.pid = h.pid;
+                                n.pid = h.pid();
                                 n.started_at = Some(Instant::now());
                             }
                             child = Some(h);
@@ -1293,7 +1288,7 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                     // grace period finds children through the published handles
                     // (cairn 0085).
                     if let Some(h) = child.take() {
-                        let _ = h.stop(grace).await;
+                        h.stop(grace).await;
                     }
                     engine.forget_handle(&name);
                     queue.push_back(Event::ChildStopped);
@@ -1394,7 +1389,7 @@ async fn next_event(
     board: &mut watch::Receiver<u64>,
     ctl: &mut ctl::Receiver,
     timers: &mut BTreeMap<lifecycle::Timer, tokio::time::Instant>,
-    child: Option<&Handle>,
+    child: Option<&dyn Child>,
 ) -> lifecycle::Event {
     use lifecycle::Event;
     let next = timers
@@ -1565,7 +1560,7 @@ pub async fn shutdown(
         if engine.plan.get(name).is_ok_and(|n| n.kind == Kind::Task)
             && let Some(child) = engine.handle_for(name)
         {
-            let _ = child.stop(stop_timeout).await;
+            child.stop(stop_timeout).await;
         }
         let grace = stop_timeout + Duration::from_secs(2);
         if tokio::time::timeout(grace, handle).await.is_err() {

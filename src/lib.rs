@@ -12,6 +12,7 @@ pub mod filter;
 pub mod global;
 pub mod graph;
 pub mod health;
+pub mod host;
 pub mod lifecycle;
 pub mod notify;
 pub mod output;

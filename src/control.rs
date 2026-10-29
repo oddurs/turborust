@@ -321,6 +321,15 @@ async fn attach<S: AsyncRead + AsyncWrite + Unpin + Send>(
         .await?;
         return Ok(());
     };
+    // A child with no pty behind it (a test's fake) has nothing to attach to.
+    let Some(handle) = handle.terminal() else {
+        write_line(
+            &mut stream,
+            &Response::err(format!("`{node}` has no terminal to attach to")),
+        )
+        .await?;
+        return Ok(());
+    };
 
     // Only one terminal may own the input side; two people typing into the same
     // shell interleave into nonsense.

@@ -136,8 +136,9 @@ async fn event_loop(
             let selected = engine.state.lock().unwrap().selected;
             if let Some(bytes) = key_to_bytes(&k)
                 && let Some(handle) = names.get(selected).and_then(|n| engine.handle_for(n))
+                && let Some(term) = handle.terminal()
             {
-                handle.write_stdin(&bytes);
+                term.write_stdin(&bytes);
             }
             continue;
         }
