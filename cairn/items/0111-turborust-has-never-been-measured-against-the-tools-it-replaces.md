@@ -100,5 +100,20 @@ slower (measured: 100 idle threads doubled the cost of a spawn). A child that
 ignores SIGTERM takes turborust its full `stop_timeout` to stop, where hivemind
 and overmind send SIGINT; that is which signal, not how fast.
 
+CI then found two more, both events that notify's debouncer had been hiding:
+
+- On Windows, the first read of a file after a while updates its last-access
+  time, which arrives as a modification. The old debouncer opened every file
+  to learn its ID when the watch began, which used up that update for every
+  file present at startup; without it, `reading_a_nested_tree_is_not_a_change`
+  failed. Real for files created later too. On Windows a modification now
+  counts only if the file's mtime moved, and a directory's never does (its
+  entries' own events say what changed).
+- The polling backend never went through the debouncer: a scan between a
+  save's truncate and its write, and the next scan, were two restarts
+  (`with_polling_an_edit_restarts_its_service_once` on macOS). Polled changes
+  now go through the same debouncer, waiting at least a scan and a half.
+  `polling_takes_a_save_seen_by_two_scans_as_one_change` fails without it.
+
 After all of it, a durability soak of the whole suite (4 workers × 25 rounds,
 900 test-binary runs) had no failures.

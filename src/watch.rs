@@ -140,31 +140,97 @@ pub fn watch_with(root: &Path, debounce: Duration, backend: Backend) -> Result<W
         }
     };
 
-    let inner: Box<dyn std::any::Any + Send> = match backend {
+    // Both backends feed one debouncer, so a change found by two scans in a
+    // row, or reported as two events, is one batch either way.
+    let (events_tx, events_rx) = std::sync::mpsc::channel();
+    let (inner, quiet): (Box<dyn std::any::Any + Send>, Duration) = match backend {
         Backend::Native => {
-            let (events_tx, events_rx) = std::sync::mpsc::channel();
+            #[cfg(windows)]
+            let mut unchanged = Unchanged::new();
             let mut w = notify::recommended_watcher(move |ev: notify::Result<notify::Event>| {
+                #[cfg(windows)]
+                if ev.as_ref().is_ok_and(|e| unchanged.is_unchanged(e)) {
+                    return;
+                }
                 if !is_access(&ev) {
                     let _ = events_tx.send(ev);
                 }
             })
             .context("creating filesystem watcher")?;
             register(&mut w, root, &warn_tx)?;
-            // Ends by itself when `w` is dropped: that drops the sender above.
-            std::thread::Builder::new()
-                .name("turborust debounce".into())
-                .spawn(move || debounce_loop(events_rx, debounce, handler))
-                .context("starting the debounce thread")?;
-            Box::new(w)
+            (Box::new(w), debounce)
         }
-        Backend::Poll(every) => Box::new(Poller::start(root, every, handler)?),
+        // A save is a truncate and then a write; a scan can land between the
+        // two, and the next one finds the rest. Waiting a scan and a half
+        // takes both as one change.
+        Backend::Poll(every) => (
+            Box::new(Poller::start(root, every, events_tx)?),
+            debounce.max(every * 3 / 2),
+        ),
     };
+    // Ends by itself when the backend in `inner` is dropped, which drops the
+    // only sender.
+    std::thread::Builder::new()
+        .name("turborust debounce".into())
+        .spawn(move || debounce_loop(events_rx, quiet, handler))
+        .context("starting the debounce thread")?;
 
     Ok(Watcher {
         _inner: inner,
         rx,
         warnings: Some(warn_rx),
     })
+}
+
+/// Modifications Windows reports that changed nothing anyone could act on.
+///
+/// The first read of a file after a while updates its last-access time, and
+/// that arrives as a modification: one spurious restart per file, the first
+/// time anything — a build, an editor, `expand_dir` — reads it. notify's own
+/// debouncer hid this by accident, by opening every file to learn its ID when
+/// the watch began. A file counts as modified here only when its modification
+/// time has moved; a directory's modification never does, since every change
+/// to its entries arrives as an event of its own.
+#[cfg(windows)]
+struct Unchanged {
+    started: std::time::SystemTime,
+    seen: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime>,
+}
+
+#[cfg(windows)]
+impl Unchanged {
+    fn new() -> Self {
+        Unchanged {
+            started: std::time::SystemTime::now(),
+            seen: Default::default(),
+        }
+    }
+
+    fn is_unchanged(&mut self, ev: &notify::Event) -> bool {
+        use notify::event::{EventKind, ModifyKind};
+        if !matches!(
+            ev.kind,
+            EventKind::Modify(ModifyKind::Any | ModifyKind::Data(_) | ModifyKind::Metadata(_))
+        ) {
+            return false;
+        }
+        ev.paths.iter().all(|p| {
+            let Ok(meta) = std::fs::metadata(p) else {
+                return false;
+            };
+            if meta.is_dir() {
+                return true;
+            }
+            let Ok(mtime) = meta.modified() else {
+                return false;
+            };
+            let moved = match self.seen.insert(p.clone(), mtime) {
+                Some(before) => mtime != before,
+                None => mtime >= self.started,
+            };
+            !moved
+        })
+    }
 }
 
 /// Reading is not changing. inotify reports a file or directory being opened,
@@ -245,10 +311,11 @@ type Snapshot =
     std::collections::BTreeMap<std::path::PathBuf, (Option<std::time::SystemTime>, u64)>;
 
 impl Poller {
-    fn start<F>(root: &Path, every: Duration, mut handler: F) -> Result<Poller>
-    where
-        F: FnMut(Batch) + Send + 'static,
-    {
+    fn start(
+        root: &Path,
+        every: Duration,
+        events: std::sync::mpsc::Sender<notify::Result<notify::Event>>,
+    ) -> Result<Poller> {
         use std::sync::atomic::{AtomicBool, Ordering};
         let root = root.to_path_buf();
         let mut before = scan(&root)?;
@@ -265,11 +332,14 @@ impl Poller {
                     if changed.is_empty() || stopped.load(Ordering::Relaxed) {
                         continue;
                     }
-                    let events = changed
-                        .into_iter()
-                        .map(|(path, kind)| notify::Event::new(kind).add_path(path))
-                        .collect();
-                    handler(Ok(events));
+                    for (path, kind) in changed {
+                        if events
+                            .send(Ok(notify::Event::new(kind).add_path(path)))
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
             })
             .context("starting the polling thread")?;
@@ -628,6 +698,32 @@ mod poll_tests {
             !batch.iter().any(|p| p.starts_with("target/")),
             "polled a never-watched directory: {batch:?}"
         );
+    }
+
+    /// A save is a truncate and a write; when a scan lands between them, the
+    /// next scan finds the rest. That is one change, not two restarts.
+    #[tokio::test]
+    async fn polling_takes_a_save_seen_by_two_scans_as_one_change() {
+        let dir = std::env::temp_dir().join(format!("turborust-poll3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "// before\n").unwrap();
+        let root = dir.canonicalize().unwrap();
+        let every = Duration::from_millis(100);
+        let mut w = watch_with(&root, Duration::from_millis(20), Backend::Poll(every)).unwrap();
+        // The two halves of the save, a scan apart.
+        std::fs::write(root.join("src/a.rs"), "").unwrap();
+        tokio::time::sleep(every + Duration::from_millis(10)).await;
+        std::fs::write(root.join("src/a.rs"), "// after\n").unwrap();
+
+        let first = tokio::time::timeout(Duration::from_secs(3), w.recv())
+            .await
+            .expect("the save was never reported")
+            .unwrap();
+        assert!(first.contains("src/a.rs"), "saw {first:?}");
+        let second = tokio::time::timeout(Duration::from_millis(600), w.recv()).await;
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(second.is_err(), "one save, two batches: then {second:?}");
     }
 
     #[tokio::test]

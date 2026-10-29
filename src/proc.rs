@@ -111,6 +111,7 @@ impl Handle {
                 libc::killpg(pid as libc::pid_t, libc::SIGTERM);
             }
         }
+        #[cfg(unix)]
         let deadline = tokio::time::Instant::now() + grace;
         if tokio::time::timeout(grace, self.exited()).await.is_err() {
             self.kill_now();

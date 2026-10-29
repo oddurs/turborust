@@ -90,7 +90,9 @@ closed or written down (cairn 0111):
   time; it now resets after a run longer than `backoff_max`. A stop returned
   once the process group's leader had gone, which could be before what the
   leader had started; it now waits for the whole group. A service's
-  `debounce` was ignored (above).
+  `debounce` was ignored (above). Two more were hiding behind notify's
+  debouncer: on Windows the first read of a file reported it modified, and a
+  polled save seen by two scans restarted twice.
 
 ## Results
 
