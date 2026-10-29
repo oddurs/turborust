@@ -63,6 +63,7 @@ closed or written down (cairn 0111):
 | memory growth, 20 s of error lines | 531 MB | 0 MB |
 | output, 1M lines | 1.1 M lines/s | 1.7 M lines/s |
 | edit to restart | 161 ms | 61 ms |
+| `run` of a cached task | 160 ms | 5 ms |
 
 - **Start.** `rustc -V` (over 100ms through rustup's proxy) and `git rev-parse`
   ran before anything started. The toolchain is now probed in the background
@@ -88,6 +89,12 @@ closed or written down (cairn 0111):
   line. Per line, the process name is shared rather than copied and plain text
   is no longer copied to strip escapes it does not have. A profile of 100,000
   lines went from 511 to 257 million instructions.
+- **A cached `run`.** It paid for `rustc -V` and then slept 60ms before
+  exiting, whether or not anything ran. The toolchain's answer is now
+  remembered against a fingerprint of everything that decides it, and the end
+  of a run waits for its output and no longer (cairn 0113). The sleep had also
+  been losing output: a streamed task printing 100,000 lines lost up to 60% of
+  them.
 - **Bugs.** Without a health check, a service's restart backoff never reset
   after a long run, so a service that crashed once a day waited longer each
   time; it now resets after a run longer than `backoff_max`. A stop returned

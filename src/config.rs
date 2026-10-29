@@ -1062,7 +1062,7 @@ fn repository_identity_from_git(root: &Path) -> Option<PathBuf> {
 }
 
 /// The per-user cache directory this platform expects.
-fn user_cache_root() -> PathBuf {
+pub(crate) fn user_cache_root() -> PathBuf {
     #[cfg(windows)]
     if let Ok(local) = std::env::var("LOCALAPPDATA") {
         return PathBuf::from(local);

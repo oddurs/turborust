@@ -710,8 +710,9 @@ async fn cmd_run(
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());
     }
-    // Let the pump drain the last lines before the process exits.
-    tokio::time::sleep(Duration::from_millis(60)).await;
+    // Every line out before exiting, and no longer than that takes: this was a
+    // fixed 60ms sleep, paid by every run whether it printed anything or not.
+    engine.drain_output(Duration::from_millis(200)).await;
     Ok(code)
 }
 
