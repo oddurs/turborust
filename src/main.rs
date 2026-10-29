@@ -151,6 +151,10 @@ enum Cmd {
     },
     /// Print the man page, in roff.
     Man,
+    /// Node names in the nearest config, one per line, for shell completion.
+    /// Prints nothing on any error.
+    #[command(name = "__nodes", hide = true)]
+    Nodes,
     /// Print a JSON Schema for turborust.toml, for editor completion, or with
     /// `--json` for one of the JSON payloads turborust prints and serves.
     Schema {
@@ -229,7 +233,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();
             let name = cmd.get_name().to_string();
-            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            let mut generated = Vec::new();
+            clap_complete::generate(shell, &mut cmd, name, &mut generated);
+            print!(
+                "{}",
+                turborust::complete::script(
+                    shell,
+                    String::from_utf8_lossy(&generated).into_owned()
+                )
+            );
+            Ok(0)
+        }
+        Cmd::Nodes => {
+            for name in turborust::complete::node_names(cli.config.as_deref()) {
+                println!("{name}");
+            }
             Ok(0)
         }
         Cmd::Schema { json: None } => {
