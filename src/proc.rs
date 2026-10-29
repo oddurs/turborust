@@ -337,10 +337,21 @@ pub fn spawn_with(
         .context("spawning pty reader thread")?;
     let _ = ready_rx.recv();
 
-    let child = pair
-        .slave
-        .spawn_command(builder)
-        .with_context(|| format!("spawning `{cmd}` in {}", cwd.display()))?;
+    // On Linux, without forking a copy of turborust (cairn 0112); anywhere
+    // that cannot be done, as portable_pty does it.
+    #[cfg(target_os = "linux")]
+    let spawned = fast_spawn::spawn(&builder, isolated, cwd, pair.master.tty_name().as_deref())
+        .map(|c| Box::new(c) as Box<dyn portable_pty::Child + Send + Sync>);
+    #[cfg(not(target_os = "linux"))]
+    let spawned: std::io::Result<Box<dyn portable_pty::Child + Send + Sync>> =
+        Err(std::io::ErrorKind::Unsupported.into());
+    let child = match spawned {
+        Ok(child) => child,
+        Err(_) => pair
+            .slave
+            .spawn_command(builder)
+            .with_context(|| format!("spawning `{cmd}` in {}", cwd.display()))?,
+    };
     let pid = child.process_id();
     // Released only after the child has inherited it, so the master sees EOF
     // when the child (and only the child) is done writing.
@@ -418,6 +429,230 @@ pub fn spawn_with(
     })
 }
 
+/// Starting a child with `posix_spawn` rather than `fork`.
+///
+/// A `fork` copies the parent's page tables, and portable_pty's `pre_exec`
+/// hook — which forces one — then lists and closes every open descriptor in
+/// the child. Both grow with the number of children already running, so the
+/// fiftieth spawn cost three times the first. glibc and musl implement
+/// `posix_spawn` with `CLONE_VM | CLONE_VFORK`: nothing is copied, and the
+/// parent waits only until the child has exec'd, by which time it holds the
+/// pty.
+///
+/// Everything portable_pty's hook does has an attribute here: the session
+/// (`POSIX_SPAWN_SETSID`), the controlling terminal (a session leader that
+/// opens a tty without `O_NOCTTY` acquires it, on Linux), default signal
+/// dispositions and an empty mask. Closing descriptors needs nothing: every one
+/// turborust opens is close-on-exec. The environment is the builder's own,
+/// so the child sees exactly what portable_pty would have given it.
+#[cfg(target_os = "linux")]
+mod fast_spawn {
+    use portable_pty::{Child, ChildKiller, CommandBuilder, ExitStatus};
+    use std::ffi::CString;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    #[derive(Debug)]
+    pub struct Spawned {
+        pid: libc::pid_t,
+        status: Option<ExitStatus>,
+    }
+
+    /// `Unsupported` for anything this cannot reproduce exactly, which sends
+    /// the caller to portable_pty instead.
+    pub fn spawn(
+        builder: &CommandBuilder,
+        isolated: bool,
+        cwd: &Path,
+        tty: Option<&Path>,
+    ) -> io::Result<Spawned> {
+        let unsupported = || io::Error::from(io::ErrorKind::Unsupported);
+        let tty = tty.ok_or_else(unsupported)?;
+        // The builder can only list its environment as UTF-8; a variable that
+        // is not would be silently lost.
+        if !isolated
+            && std::env::vars_os().any(|(k, v)| k.to_str().is_none() || v.to_str().is_none())
+        {
+            return Err(unsupported());
+        }
+        let argv = builder.get_argv();
+        if argv.is_empty() || !Path::new(&argv[0]).is_absolute() {
+            return Err(unsupported());
+        }
+        let argv: Vec<CString> = argv
+            .iter()
+            .map(|a| CString::new(a.as_bytes()))
+            .collect::<Result<_, _>>()?;
+        // As portable_pty: the builder's variables, and SHELL from its own rule.
+        let mut env: Vec<CString> = builder
+            .iter_full_env_as_str()
+            .filter(|(k, _)| *k != "SHELL")
+            .map(|(k, v)| CString::new(format!("{k}={v}")))
+            .collect::<Result<_, _>>()?;
+        env.push(CString::new(format!("SHELL={}", builder.get_shell()))?);
+        let tty = CString::new(tty.as_os_str().as_bytes())?;
+        let cwd = CString::new(cwd.as_os_str().as_bytes())?;
+
+        let mut argv_ptrs: Vec<*mut libc::c_char> =
+            argv.iter().map(|a| a.as_ptr() as *mut _).collect();
+        argv_ptrs.push(std::ptr::null_mut());
+        let mut env_ptrs: Vec<*mut libc::c_char> =
+            env.iter().map(|e| e.as_ptr() as *mut _).collect();
+        env_ptrs.push(std::ptr::null_mut());
+
+        // SAFETY: every pointer handed over outlives the call, the attribute
+        // and file-action objects are initialised before use and destroyed
+        // after, and posix_spawn writes only `pid`.
+        unsafe {
+            let mut actions: libc::posix_spawn_file_actions_t = std::mem::zeroed();
+            let mut attr: libc::posix_spawnattr_t = std::mem::zeroed();
+            check(libc::posix_spawn_file_actions_init(&mut actions))?;
+            if let Err(e) = check(libc::posix_spawnattr_init(&mut attr)) {
+                libc::posix_spawn_file_actions_destroy(&mut actions);
+                return Err(e);
+            }
+            let result = (|| -> io::Result<libc::pid_t> {
+                check(libc::posix_spawn_file_actions_addchdir_np(
+                    &mut actions,
+                    cwd.as_ptr(),
+                ))?;
+                check(libc::posix_spawn_file_actions_addopen(
+                    &mut actions,
+                    0,
+                    tty.as_ptr(),
+                    libc::O_RDWR,
+                    0,
+                ))?;
+                check(libc::posix_spawn_file_actions_adddup2(&mut actions, 0, 1))?;
+                check(libc::posix_spawn_file_actions_adddup2(&mut actions, 0, 2))?;
+                let mut defaults: libc::sigset_t = std::mem::zeroed();
+                libc::sigfillset(&mut defaults);
+                libc::sigdelset(&mut defaults, libc::SIGKILL);
+                libc::sigdelset(&mut defaults, libc::SIGSTOP);
+                check(libc::posix_spawnattr_setsigdefault(&mut attr, &defaults))?;
+                let mut mask: libc::sigset_t = std::mem::zeroed();
+                libc::sigemptyset(&mut mask);
+                check(libc::posix_spawnattr_setsigmask(&mut attr, &mask))?;
+                let flags = libc::POSIX_SPAWN_SETSID
+                    | libc::POSIX_SPAWN_SETSIGDEF as libc::c_short
+                    | libc::POSIX_SPAWN_SETSIGMASK as libc::c_short;
+                check(libc::posix_spawnattr_setflags(&mut attr, flags))?;
+                let mut pid: libc::pid_t = 0;
+                check(libc::posix_spawn(
+                    &mut pid,
+                    argv[0].as_ptr(),
+                    &actions,
+                    &attr,
+                    argv_ptrs.as_ptr(),
+                    env_ptrs.as_ptr(),
+                ))?;
+                Ok(pid)
+            })();
+            libc::posix_spawn_file_actions_destroy(&mut actions);
+            libc::posix_spawnattr_destroy(&mut attr);
+            Ok(Spawned {
+                pid: result?,
+                status: None,
+            })
+        }
+    }
+
+    /// posix_spawn's functions return an error number rather than set errno.
+    fn check(code: libc::c_int) -> io::Result<()> {
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::from_raw_os_error(code))
+        }
+    }
+
+    /// The status as portable_pty reports it: a signal is code 1, named.
+    fn decode(raw: libc::c_int) -> ExitStatus {
+        if libc::WIFSIGNALED(raw) {
+            let sig = libc::WTERMSIG(raw);
+            let name = unsafe { libc::strsignal(sig) };
+            let name = if name.is_null() {
+                format!("Signal {sig}")
+            } else {
+                unsafe { std::ffi::CStr::from_ptr(name) }
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            ExitStatus::with_signal(&name)
+        } else {
+            ExitStatus::with_exit_code(libc::WEXITSTATUS(raw) as u32)
+        }
+    }
+
+    impl Child for Spawned {
+        fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
+            if let Some(s) = &self.status {
+                return Ok(Some(s.clone()));
+            }
+            let mut raw = 0;
+            match unsafe { libc::waitpid(self.pid, &mut raw, libc::WNOHANG) } {
+                0 => Ok(None),
+                -1 => Err(io::Error::last_os_error()),
+                _ => {
+                    let s = decode(raw);
+                    self.status = Some(s.clone());
+                    Ok(Some(s))
+                }
+            }
+        }
+
+        fn wait(&mut self) -> io::Result<ExitStatus> {
+            loop {
+                if let Some(s) = &self.status {
+                    return Ok(s.clone());
+                }
+                let mut raw = 0;
+                if unsafe { libc::waitpid(self.pid, &mut raw, 0) } == -1 {
+                    let e = io::Error::last_os_error();
+                    if e.kind() != io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                    continue;
+                }
+                self.status = Some(decode(raw));
+            }
+        }
+
+        fn process_id(&self) -> Option<u32> {
+            Some(self.pid as u32)
+        }
+    }
+
+    impl ChildKiller for Spawned {
+        fn kill(&mut self) -> io::Result<()> {
+            // Once reaped, the pid may already be someone else's.
+            if self.status.is_none() {
+                unsafe { libc::kill(self.pid, libc::SIGKILL) };
+            }
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Killer(self.pid))
+        }
+    }
+
+    #[derive(Debug)]
+    struct Killer(libc::pid_t);
+
+    impl ChildKiller for Killer {
+        fn kill(&mut self) -> io::Result<()> {
+            unsafe { libc::kill(self.0, libc::SIGKILL) };
+            Ok(())
+        }
+
+        fn clone_killer(&self) -> Box<dyn ChildKiller + Send + Sync> {
+            Box::new(Killer(self.0))
+        }
+    }
+}
+
 /// Resolves once `pid` has exited, without a thread: a pidfd turns readable
 /// when its process ends. `None` where there is no pidfd (before Linux 5.3,
 /// other systems) or no runtime to register it with.
@@ -453,6 +688,10 @@ fn exit_notifier(_pid: Option<u32>) -> Option<std::future::Ready<()>> {
 /// wait out its whole grace period.
 #[cfg(unix)]
 fn group_alive(pgid: libc::pid_t) -> bool {
+    // No member at all, zombies included: the usual answer, and the cheap one.
+    if unsafe { libc::killpg(pgid, 0) } != 0 {
+        return false;
+    }
     #[cfg(target_os = "linux")]
     if let Ok(dir) = std::fs::read_dir("/proc") {
         return dir.flatten().any(|entry| {
@@ -860,6 +1099,100 @@ mod tests {
     // Unix only until someone can debug pty capture on Windows directly: both
     // of these see no child output at all there, and blind iteration against CI
     // has not found why. Everything else in the suite passes on Windows. See 0062.
+    /// Spawns `cmd` and waits for each of `words` in its output, in order,
+    /// running `between` after each but the last.
+    #[cfg(unix)]
+    async fn expect_in_order(cmd: &str, words: &[&str], mut between: impl FnMut(&Handle, usize)) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let h = spawn("t", cmd, Path::new("."), &Default::default(), tx).unwrap();
+        let mut seen = String::new();
+        for (i, word) in words.iter().enumerate() {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            loop {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "never saw {word:?}; output was {seen:?}"
+                );
+                if let Ok(Some(ProcEvent::Line(l))) =
+                    tokio::time::timeout(Duration::from_millis(250), rx.recv()).await
+                {
+                    let text = strip_ansi(&l.text).into_owned();
+                    seen.push_str(&text);
+                    seen.push('\n');
+                    if text.contains(word) {
+                        break;
+                    }
+                }
+            }
+            if i + 1 < words.len() {
+                between(&h, i);
+            }
+        }
+        h.kill_now();
+    }
+
+    /// The fast path is taken, not fallen back from: the terminal tests here
+    /// pass either way, so they cannot tell.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_spawns_without_forking() {
+        use portable_pty::Child as _;
+        let pair = native_pty_system().openpty(PtySize::default()).unwrap();
+        let mut b = CommandBuilder::new("/bin/sh");
+        b.arg("-c");
+        b.arg("exit 7");
+        let mut child = fast_spawn::spawn(
+            &b,
+            false,
+            &std::env::temp_dir(),
+            pair.master.tty_name().as_deref(),
+        )
+        .expect("posix_spawn path");
+        drop(pair.slave);
+        assert_eq!(child.wait().unwrap().exit_code(), 7);
+    }
+
+    /// What `connect` relies on: ctrl-c typed into the pty reaches the child as
+    /// SIGINT, which needs the pty to be its controlling terminal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn ctrl_c_through_the_pty_interrupts_the_child() {
+        expect_in_order(
+            "trap 'echo got-int; exit 0' INT; echo ready; while :; do sleep 0.05; done",
+            &["ready", "got-int"],
+            |h, _| assert!(h.write_stdin(&[0x03])),
+        )
+        .await;
+    }
+
+    /// A resize tells full-screen programs to redraw, by SIGWINCH to the
+    /// terminal's foreground group.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_resize_reaches_the_child_as_sigwinch() {
+        expect_in_order(
+            "trap 'echo got-winch' WINCH; echo ready; while :; do sleep 0.05; done",
+            &["ready", "got-winch"],
+            |h, _| assert!(h.resize(50, 100)),
+        )
+        .await;
+    }
+
+    /// The child leads its own session — what lets the whole group be
+    /// signalled — and its stdin is the terminal.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn the_child_leads_a_session_on_its_terminal() {
+        expect_in_order(
+            "[ -t 0 ] && [ -t 1 ] && echo is-a-tty; \
+             awk '{ print ($6 == $1 && $7 != 0) ? \"session-leader-with-tty\" : \"no\" }' /proc/$$/stat; \
+             sleep 5",
+            &["is-a-tty", "session-leader-with-tty"],
+            |_, _| {},
+        )
+        .await;
+    }
+
     /// The leader dying is not the group stopping: here the shell dies of the
     /// SIGTERM at once, and the child it started takes 300ms to finish — after
     /// the hangup the leader's exit sends it, too. `stop` used to return with
