@@ -781,12 +781,10 @@ own right, not a feature.
   your build. `turborust doctor` targets that floor directly.
 - Shared caching is filesystem-based (a mount or synced folder). There is no
   HTTP cache server, and no authentication beyond the filesystem's own.
-- macOS and Linux are fully exercised. On Windows, 165 of 167 tests pass in CI;
-  the two that do not are the pty tests, which capture no child output there.
-  Windows pty behaviour — and the job-object process teardown those tests would
-  exercise — is therefore **unverified** rather than working. The integration
-  suites are Unix-gated too, because their fixtures are POSIX shell and turborust
-  spawns through `cmd /C` there; a configurable shell would fix that half (`0062`).
+- macOS and Linux are fully exercised. On Windows the unit suite runs in CI,
+  pty capture and job-object teardown included. The integration suites are
+  Unix-gated, because their fixtures are POSIX shell and turborust spawns through
+  `cmd /C` there; a configurable shell would fix that (`0062`).
 - Remote/shared caching is not implemented; the cache is local, and is blocked on
   the two items above.
 

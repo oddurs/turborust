@@ -2,10 +2,11 @@
 id: 62
 title: pty output capture is unverified on Windows
 type: bug
-status: backlog
+status: doing
 milestone: later
 created: 2026-09-08
-updated: 2026-10-28
+updated: 2026-10-29
+claimed: 2026-10-29
 priority: p2
 effort: m
 area: proc
@@ -69,11 +70,20 @@ Candidates worth checking first:
 
 ## Acceptance criteria
 
-- [ ] The cause is identified rather than worked around
-- [ ] Both tests run and pass on windows-latest
-- [ ] The `#[cfg(unix)]` gates are removed
+- [x] The cause is identified rather than worked around
+- [x] Both tests run and pass on windows-latest
+- [x] The `#[cfg(unix)]` gates are removed
 - [ ] A configurable shell makes the integration fixtures portable
 
 ## 2026-10-28
 
 mise has `run_windows`, a per-task replacement command on Windows. A configurable shell (above) is the broader answer and makes most of that unnecessary, but a per-node override would still help where a command has no portable spelling at all. Noted from the `0090` survey rather than filed separately.
+
+## 2026-10-29
+
+A cause, found by reading rather than iterating: `portable-pty` 0.9.0 creates the pseudoconsole with `PSEUDOCONSOLE_INHERIT_CURSOR` (`src/win/psuedocon.rs`). With that flag ConPTY's first act is to ask the hosting terminal where the cursor is (`ESC[6n`), and it renders nothing until the answer comes back on its input. turborust never answered, which fits both symptoms exactly: no output at all from the first test, and "child never started" from the second, which waits for a line that is never rendered. It also explains why reordering the reader changed nothing: the reader was fine, there was simply nothing to read.
+
+The reader now answers `ESC[1;1R` on Windows, once per query, unless a terminal is attached through `connect` to answer for itself. The query is found even when split across two reads. Not on Unix: a Unix pty asks nothing, and with echo on, a reply to a child that merely printed those bytes would land in its stdin and its log. The two tests are un-gated; whether this is the whole cause is for `windows-latest` to say.
+
+Confirmed on `windows-latest` (#52's CI): `captures_child_output_and_exit_code`, `stop_kills_the_whole_process_group` and `the_reader_answers_a_cursor_query` all pass, in a unit suite of 241 with nothing ignored. The unanswered cursor query was the whole cause. The item stays open for the configurable shell, the one criterion left.
+
