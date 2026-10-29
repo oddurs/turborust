@@ -193,7 +193,7 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`##########` 93% · 14 of 15 done
+`##########` 94% · 15 of 16 done
 
 ### backlog
 
@@ -215,4 +215,5 @@ Good ideas without a date yet.
 - [x] `0096` A crash loop never gives up <sup>feature · p3</sup>
 - [x] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
 - [x] `0098` A command cannot see which files changed <sup>feature · p3</sup>
+- [x] `0102` Dependency updates have piled up <sup>chore · p2</sup>
 
