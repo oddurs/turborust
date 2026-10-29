@@ -190,7 +190,191 @@ impl Default for NodeState {
     }
 }
 
+/// One thing that happened to a node's lifecycle (cairn 0107).
+///
+/// Output lines are not facts: they already live in their own append-only
+/// store, and diagnostics and log readiness are derived from those.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fact {
+    Status(Status),
+    /// Why it last (re)started, or why it is not running.
+    Reason(String),
+    /// A restart was counted, for this reason.
+    Restarted(String),
+    /// A child started, with this pid.
+    Spawned(Option<u32>),
+    /// The child's pid became known, or changed.
+    Pid(Option<u32>),
+}
+
+#[derive(Debug, Clone)]
+pub struct Entry {
+    /// Position in the whole history, from 1, gaps never.
+    pub seq: u64,
+    pub at: Instant,
+    pub node: String,
+    pub fact: Fact,
+}
+
+impl Entry {
+    /// One line, for a test that timed out or a bug report.
+    pub fn describe(&self, origin: Instant) -> String {
+        let t = self.at.saturating_duration_since(origin);
+        let what = match &self.fact {
+            Fact::Status(s) => s.label(),
+            Fact::Reason(r) => format!("because {r}"),
+            Fact::Restarted(r) => format!("restart counted: {r}"),
+            Fact::Spawned(pid) => format!("spawned pid {}", fmt_pid(*pid)),
+            Fact::Pid(pid) => format!("pid {}", fmt_pid(*pid)),
+        };
+        format!("#{} +{} {} {what}", self.seq, fmt_dur(t), self.node)
+    }
+}
+
+fn fmt_pid(pid: Option<u32>) -> String {
+    pid.map_or("-".into(), |p| p.to_string())
+}
+
+/// What happens to a node when `fact` is recorded: the one function the live
+/// state and a replay are both built by, so they cannot drift.
+pub fn apply(n: &mut NodeState, fact: &Fact, at: Instant) {
+    match fact {
+        Fact::Status(status) => {
+            // A new attempt invalidates the previous attempt's diagnostics;
+            // without this a fixed error stays on screen until something else
+            // overwrites it.
+            if matches!(status, Status::Running | Status::Starting) {
+                n.diag.reset();
+                n.log_ready = false;
+            }
+            // Reaching a usable result is what dependents care about.
+            if status.is_ready() {
+                n.generation += 1;
+            }
+            n.status = status.clone();
+        }
+        Fact::Reason(r) => n.reason = Some(r.clone()),
+        Fact::Restarted(r) => {
+            n.restarts += 1;
+            n.reason = Some(r.clone());
+        }
+        Fact::Spawned(pid) => {
+            n.pid = *pid;
+            n.started_at = Some(at);
+        }
+        Fact::Pid(pid) => n.pid = *pid,
+    }
+}
+
+/// The lifecycle half of a node, which a projection must reproduce exactly.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Life {
+    pub status: Status,
+    pub reason: Option<String>,
+    pub restarts: u32,
+    pub pid: Option<u32>,
+    pub started_at: Option<Instant>,
+    pub generation: u64,
+}
+
+/// Every fact ever recorded, oldest first.
+///
+/// Bounded the way the output store is, but without forgetting: an entry that
+/// falls off the front is folded into `base`, so `base` plus the entries kept
+/// is always the whole history. A long `up` keeps the recent past in detail
+/// and the rest as a summary.
+pub struct History {
+    base: BTreeMap<String, NodeState>,
+    entries: VecDeque<Entry>,
+    cap: usize,
+    next: u64,
+    pub origin: Instant,
+}
+
+impl History {
+    fn new(seed: &BTreeMap<String, NodeState>, cap: usize) -> History {
+        History {
+            base: seed.clone(),
+            entries: VecDeque::new(),
+            cap: cap.max(1),
+            next: 1,
+            origin: now(),
+        }
+    }
+
+    fn push(&mut self, node: &str, fact: Fact, at: Instant) {
+        if self.entries.len() == self.cap
+            && let Some(old) = self.entries.pop_front()
+            && let Some(n) = self.base.get_mut(&old.node)
+        {
+            apply(n, &old.fact, old.at);
+        }
+        self.entries.push_back(Entry {
+            seq: self.next,
+            at,
+            node: node.into(),
+            fact,
+        });
+        self.next += 1;
+    }
+
+    pub fn entries(&self) -> impl Iterator<Item = &Entry> {
+        self.entries.iter()
+    }
+
+    /// Facts recorded, ever; more than `entries()` holds once it has wrapped.
+    pub fn total(&self) -> u64 {
+        self.next - 1
+    }
+
+    /// The node states this history describes, rebuilt from nothing but it.
+    pub fn project(&self) -> BTreeMap<String, Life> {
+        let mut nodes = self.base.clone();
+        for e in &self.entries {
+            if let Some(n) = nodes.get_mut(&e.node) {
+                apply(n, &e.fact, e.at);
+            }
+        }
+        nodes.iter().map(|(k, n)| (k.clone(), n.life())).collect()
+    }
+
+    /// The kept entries, one per line.
+    pub fn describe(&self) -> String {
+        let skipped = self.total() - self.entries.len() as u64;
+        let mut out = if skipped > 0 {
+            format!("({skipped} earlier facts summarised)\n")
+        } else {
+            String::new()
+        };
+        for e in &self.entries {
+            out.push_str(&e.describe(self.origin));
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// tokio's clock, which is the system's except under a paused test clock, where
+/// it makes a history read in the simulation's own time.
+fn now() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
+/// Facts kept in detail; a busy hour of `up` is a few hundred.
+const HISTORY_CAP: usize = 10_000;
+
 impl NodeState {
+    pub fn life(&self) -> Life {
+        Life {
+            status: self.status.clone(),
+            reason: self.reason.clone(),
+            restarts: self.restarts,
+            pid: self.pid,
+            started_at: self.started_at,
+            generation: self.generation,
+        }
+    }
+
     pub fn uptime(&self) -> Option<Duration> {
         self.started_at.map(|t| t.elapsed())
     }
@@ -330,24 +514,37 @@ pub struct AppState {
     /// Set once shutdown begins, so the UI can say so.
     pub shutting_down: bool,
     pub build: Option<BuildInfo>,
+    /// What happened, in order. The lifecycle fields of `nodes` are its
+    /// projection: they change only through [`AppState::record`].
+    pub history: History,
 }
 
 impl AppState {
     pub fn new(nodes: &[(String, &'static str, Option<u16>)], log_cap: usize) -> Self {
+        Self::with_history(nodes, log_cap, HISTORY_CAP)
+    }
+
+    pub fn with_history(
+        nodes: &[(String, &'static str, Option<u16>)],
+        log_cap: usize,
+        history_cap: usize,
+    ) -> Self {
+        let nodes: BTreeMap<String, NodeState> = nodes
+            .iter()
+            .map(|(n, kind, port)| {
+                (
+                    n.clone(),
+                    NodeState {
+                        kind,
+                        port: *port,
+                        ..Default::default()
+                    },
+                )
+            })
+            .collect();
         AppState {
-            nodes: nodes
-                .iter()
-                .map(|(n, kind, port)| {
-                    (
-                        n.clone(),
-                        NodeState {
-                            kind,
-                            port: *port,
-                            ..Default::default()
-                        },
-                    )
-                })
-                .collect(),
+            history: History::new(&nodes, history_cap),
+            nodes,
             logs: LogStore::new(log_cap),
             focus: None,
             selected: 0,
@@ -457,10 +654,22 @@ impl AppState {
         }
     }
 
-    pub fn set(&mut self, name: &str, status: Status) {
+    /// Appends `fact` to the history and applies it: the only way a node's
+    /// lifecycle changes. A fact about a node not in the plan is dropped.
+    pub fn record(&mut self, name: &str, fact: Fact) {
+        let at = now();
         if let Some(n) = self.nodes.get_mut(name) {
-            n.status = status;
+            apply(n, &fact, at);
+            self.history.push(name, fact, at);
         }
+    }
+
+    /// The lifecycle of every node, as it stands.
+    pub fn lives(&self) -> BTreeMap<String, Life> {
+        self.nodes
+            .iter()
+            .map(|(k, n)| (k.clone(), n.life()))
+            .collect()
     }
 
     pub fn names(&self) -> Vec<String> {
@@ -471,6 +680,77 @@ impl AppState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seeded(cap: usize) -> AppState {
+        AppState::with_history(
+            &[
+                ("api".into(), "service", Some(3000)),
+                ("build".into(), "task", None),
+            ],
+            100,
+            cap,
+        )
+    }
+
+    /// A run's worth of facts, in an order a real run could produce.
+    fn churn(st: &mut AppState, rounds: u32) {
+        for i in 0..rounds {
+            st.record("build", Fact::Status(Status::Running));
+            st.record(
+                "build",
+                Fact::Status(Status::Done {
+                    cached: i % 2 == 0,
+                    duration: Duration::from_millis(i as u64),
+                }),
+            );
+            st.record("api", Fact::Status(Status::Stopping));
+            st.record("api", Fact::Restarted(format!("round {i}")));
+            st.record("api", Fact::Status(Status::Starting));
+            st.record("api", Fact::Spawned(Some(100 + i)));
+            st.record("api", Fact::Pid(Some(200 + i)));
+            st.record("api", Fact::Status(Status::Healthy));
+            st.record("ghost", Fact::Reason("not in the plan".into()));
+        }
+    }
+
+    #[test]
+    fn the_history_rebuilds_every_lifecycle() {
+        let mut st = seeded(10_000);
+        churn(&mut st, 50);
+        assert_eq!(
+            st.history.total(),
+            50 * 8,
+            "facts about unknown nodes dropped"
+        );
+        assert_eq!(st.history.project(), st.lives());
+        assert_eq!(st.nodes["api"].restarts, 50);
+        assert_eq!(st.nodes["api"].generation, 50);
+        assert_eq!(st.nodes["build"].generation, 50);
+        assert_eq!(st.nodes["api"].pid, Some(249));
+    }
+
+    #[test]
+    fn a_history_past_its_cap_summarises_without_forgetting() {
+        let mut st = seeded(7);
+        churn(&mut st, 50);
+        assert_eq!(st.history.entries().count(), 7);
+        assert_eq!(st.history.total(), 400);
+        assert_eq!(st.history.project(), st.lives());
+        let seqs: Vec<u64> = st.history.entries().map(|e| e.seq).collect();
+        assert_eq!(seqs, (394..=400).collect::<Vec<_>>(), "the newest are kept");
+        assert!(
+            st.history
+                .describe()
+                .starts_with("(393 earlier facts summarised)")
+        );
+    }
+
+    #[test]
+    fn an_empty_history_projects_the_seed() {
+        let st = seeded(3);
+        assert_eq!(st.history.project(), st.lives());
+        assert_eq!(st.history.total(), 0);
+    }
 
     fn line(proc: &str, text: &str, transient: bool) -> LogLine {
         LogLine {

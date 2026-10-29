@@ -28,7 +28,7 @@ use crate::host::{Child, Host, ProbeRequest, SpawnRequest};
 use crate::lifecycle;
 use crate::plan::{Kind, Node, Plan};
 use crate::proc::{self, ProcEvent};
-use crate::state::{AppState, Status};
+use crate::state::{AppState, Fact, Status};
 use anyhow::Result;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -383,27 +383,13 @@ impl Engine {
         if same && !status.is_ready() {
             return;
         }
-        // A new attempt invalidates the previous attempt's diagnostics; without
-        // this a fixed error stays on screen until something else overwrites it.
-        if matches!(status, Status::Running | Status::Starting)
-            && let Some(n) = st.nodes.get_mut(name)
-        {
-            n.diag.reset();
-            n.log_ready = false;
-        }
-        // Reaching a usable result is what dependents care about.
-        if matches!(status, Status::Done { .. } | Status::Healthy)
-            && let Some(n) = st.nodes.get_mut(name)
-        {
-            n.generation += 1;
-        }
         // Only health transitions are notified; see the notifier for why.
         let health = match status {
             Status::Failed(_) | Status::Unhealthy => Some(true),
             Status::Healthy | Status::Done { .. } => Some(false),
             _ => None,
         };
-        st.set(name, status);
+        st.record(name, Fact::Status(status));
         drop(st);
         self.board.send_modify(|v| *v = v.wrapping_add(1));
         if let Some(failing) = health
@@ -1240,10 +1226,11 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                 Action::Log(l) => engine.log(&name, l),
                 Action::Fail { error, code } => engine.fail(&name, error, code),
                 Action::CountRestart(reason) => {
-                    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
-                        n.restarts += 1;
-                        n.reason = Some(reason);
-                    }
+                    engine
+                        .state
+                        .lock()
+                        .unwrap()
+                        .record(&name, Fact::Restarted(reason));
                 }
                 Action::DrainControl => queue.push_back(Event::Drained {
                     stop: ctl.drain_stale(),
@@ -1273,10 +1260,11 @@ async fn supervise_service(engine: Arc<Engine>, node: Node, mut ctl: ctl::Receiv
                     match spawned {
                         Ok(h) => {
                             engine.register_handle(&name, h.clone());
-                            if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(&name) {
-                                n.pid = h.pid();
-                                n.started_at = Some(Instant::now());
-                            }
+                            engine
+                                .state
+                                .lock()
+                                .unwrap()
+                                .record(&name, Fact::Spawned(h.pid()));
                             child = Some(h);
                             queue.push_back(Event::Spawned);
                         }
@@ -1426,9 +1414,11 @@ async fn next_event(
 }
 
 fn set_reason(engine: &Engine, name: &str, reason: String) {
-    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(name) {
-        n.reason = Some(reason);
-    }
+    engine
+        .state
+        .lock()
+        .unwrap()
+        .record(name, Fact::Reason(reason));
 }
 
 /// Drains process events into the shared state. Single consumer, so the log
@@ -1509,8 +1499,8 @@ pub async fn pump_events_with(
             }
             ProcEvent::Started { proc, pid } => {
                 let mut st = state.lock().unwrap();
-                if let Some(n) = st.nodes.get_mut(&proc) {
-                    n.pid = pid;
+                if st.nodes.get(&proc).is_some_and(|n| n.pid != pid) {
+                    st.record(&proc, Fact::Pid(pid));
                 }
             }
             // A node's outcome is what decides whether its buffered output is

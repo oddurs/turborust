@@ -94,9 +94,10 @@ impl Sim {
                     .iter()
                     .map(|(n, s)| format!("{n}={}", s.status.label()))
                     .collect();
+                let history = st.history.describe();
                 drop(st);
                 panic!(
-                    "never: {what}; state was [{}]\nlog:\n{}",
+                    "never: {what}; state was [{}]\nhistory:\n{history}log:\n{}",
                     now.join(", "),
                     self.log()
                 );
@@ -109,10 +110,25 @@ impl Sim {
         self.wires[node].ctl_tx.send(msg);
     }
 
+    /// Stops everything, then checks that the recorded history alone rebuilds
+    /// every node's lifecycle exactly as the run left it (cairn 0107). Every
+    /// scenario here ends this way, so each one is also a replay test.
     async fn shutdown(&mut self) {
         let sups = self.supervisors.take().unwrap();
         engine::shutdown(&self.engine, &self.wires, sups).await;
+        assert_replays(&self.engine);
     }
+}
+
+fn assert_replays(engine: &Engine) {
+    let st = engine.state.lock().unwrap();
+    assert!(st.history.total() > 0, "a run with no history");
+    assert_eq!(
+        st.history.project(),
+        st.lives(),
+        "the history does not rebuild the state:\n{}",
+        st.history.describe()
+    );
 }
 
 fn healthy(node: &'static str) -> impl Fn(&Sim) -> bool {
@@ -246,6 +262,7 @@ async fn a_task_over_its_timeout_fails_with_124_without_waiting_ten_minutes() {
         real.elapsed()
     );
     assert!(!host.running("hang"), "the timed-out child was stopped");
+    assert_replays(&engine);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

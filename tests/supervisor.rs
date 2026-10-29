@@ -129,8 +129,9 @@ impl Harness {
                     .map(|l| format!("  {} | {}", l.proc, turborust::proc::strip_ansi(&l.text)))
                     .collect();
                 panic!(
-                    "timed out waiting for {what}; state was [{}]\nlog:\n{}",
+                    "timed out waiting for {what}; state was [{}]\nhistory:\n{}log:\n{}",
                     now.join(", "),
+                    st.history.describe(),
                     log.join("\n")
                 );
             }
@@ -142,6 +143,15 @@ impl Harness {
         if let Some(s) = self.supervisors.take() {
             engine::shutdown(&self.engine, &self.wires, s).await;
         }
+        // Real processes, real timing: the history must still rebuild the
+        // state it describes (cairn 0107).
+        let st = self.engine.state.lock().unwrap();
+        assert_eq!(
+            st.history.project(),
+            st.lives(),
+            "the history does not rebuild the state:\n{}",
+            st.history.describe()
+        );
     }
 }
 
