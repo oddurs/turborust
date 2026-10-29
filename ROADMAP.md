@@ -193,11 +193,7 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`##########` 94% · 15 of 16 done
-
-### backlog
-
-- [ ] `0101` An edit right after the watch starts can be missed <sup>bug · p2</sup>
+`##########` 100% · 16 of 16 done
 
 ### done
 
@@ -215,5 +211,6 @@ Good ideas without a date yet.
 - [x] `0096` A crash loop never gives up <sup>feature · p3</sup>
 - [x] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
 - [x] `0098` A command cannot see which files changed <sup>feature · p3</sup>
+- [x] `0101` A dependency that rebuilds instantly never restarts its dependents <sup>bug · p1</sup>
 - [x] `0102` Dependency updates have piled up <sup>chore · p2</sup>
 

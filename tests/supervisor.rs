@@ -1495,3 +1495,52 @@ async fn a_restarted_node_is_told_which_of_its_files_changed() {
     }
     h.shutdown().await;
 }
+
+#[tokio::test]
+async fn a_dependency_rebuilt_too_fast_to_see_go_down_still_restarts_its_dependents() {
+    // Cover for cairn 0101. Readiness travels on a channel that keeps only its
+    // latest value, so a dependency that reruns without yielding goes false and
+    // back to true before anything observes the false. A cache hit is exactly
+    // that, and reverting an edit produces one: the dependent then saw only
+    // "up", ignored it, and kept running against code that had changed back.
+    let h = Harness::start(
+        "fast-edge",
+        r#"
+        [tasks.check]
+        cmd = "true"
+        inputs = ["src/**"]
+
+        [services.api]
+        cmd = "sleep 30"
+        depends_on = ["check"]
+        "#,
+        &["api"],
+    );
+    std::fs::create_dir_all(h.path("src")).unwrap();
+    std::fs::write(h.path("src/a.rs"), "// v1").unwrap();
+    let mut h = h.with_watcher();
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+
+    std::fs::write(h.path("src/a.rs"), "// v2").unwrap();
+    h.wait_for("a restart for v2", |st| st.nodes["api"].restarts >= 1)
+        .await;
+    h.wait_for("api healthy on v2", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+
+    // Back to v1: `check` is served from cache, instantly.
+    std::fs::write(h.path("src/a.rs"), "// v1").unwrap();
+    h.wait_for("check served from cache", |st| {
+        matches!(st.nodes["check"].status, Status::Done { cached: true, .. })
+    })
+    .await;
+    h.wait_for("a restart for the revert", |st| {
+        st.nodes["api"].restarts >= 2
+    })
+    .await;
+    h.shutdown().await;
+}

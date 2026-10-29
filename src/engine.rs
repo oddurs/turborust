@@ -1288,7 +1288,7 @@ async fn supervise(
                 engine.set(&name, Status::Healthy);
                 true
             }
-            Some(_) => match probe_until(&engine, &node, &handle, &mut ctl).await {
+            Some(_) => match probe_until(&engine, &node, &handle, &mut ctl, &seen).await {
                 Ready::Yes => {
                     engine.set(&name, Status::Healthy);
                     backoff = node.backoff_min;
@@ -1379,11 +1379,15 @@ async fn supervise(
                     Some(Ctl::DepDown(d)) => {
                         break StopReason::DepDown(format!("dependency `{d}` is rebuilding"))
                     }
-                    // Already running, so a dependency coming back is either the
-                    // edge that started us or the tail of a DepDown we have
-                    // already acted on. Restarting here would double every
-                    // cascade: once on the down edge, once on the up edge.
-                    Some(Ctl::DepUp(_)) => continue,
+                    // Already running, so a dependency coming back is usually
+                    // the edge that started us or the tail of a DepDown we have
+                    // already acted on; restarting for those would double every
+                    // cascade. Unless its generation moved: then it produced a
+                    // result this process never saw go down for.
+                    Some(Ctl::DepUp(d)) => match missed_down(&engine, &node, &seen, &d) {
+                        Some(why) => break StopReason::DepDown(why),
+                        None => continue,
+                    },
                     Some(Ctl::Stop) | None => break StopReason::Stop,
                 },
             }
@@ -1831,6 +1835,19 @@ async fn wait_for_rerun(
     }
 }
 
+/// Whether a `DepUp` from `dep` hides a down edge this node never saw.
+///
+/// Readiness travels on a `watch` channel, which keeps only the latest value. A
+/// dependency that reruns in a few milliseconds goes false and back to true
+/// before its monitor task is scheduled, and the monitor then reports only
+/// "up" — which a running node rightly ignores, so the rebuild never reached it
+/// (cairn 0101). `seen` is the dependencies' generations this process was
+/// started against; a generation past it is a result the process predates.
+fn missed_down(engine: &Engine, node: &Node, seen: &[u64], dep: &str) -> Option<String> {
+    (engine.generations(&node.depends_on) != seen)
+        .then(|| format!("dependency `{dep}` produced a new result"))
+}
+
 /// Outcome of waiting for a node to become ready.
 enum Ready {
     Yes,
@@ -1853,6 +1870,7 @@ async fn probe_until(
     node: &Node,
     handle: &Handle,
     ctl: &mut ctl::Receiver,
+    seen: &[u64],
 ) -> Ready {
     let Some(h) = node.health.as_ref() else {
         return Ready::Yes;
@@ -1904,6 +1922,9 @@ async fn probe_until(
                     return Ready::Interrupted(Ctl::Restart(r));
                 }
                 Some(Ctl::DepDown(d)) => return Ready::Interrupted(Ctl::DepDown(d)),
+                Some(Ctl::DepUp(d)) if missed_down(engine, node, seen, &d).is_some() => {
+                    return Ready::Interrupted(Ctl::DepDown(d));
+                }
                 Some(_) => {}
             },
         }
