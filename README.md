@@ -90,6 +90,15 @@ overlay's endpoints print JSON with a schema and a `schemaVersion`, and
 `code`. `turborust schema --json <output>` prints each schema. What may change
 without a new version is in [docs/json.md](docs/json.md).
 
+For an agent, `turborust mcp` serves the same answers over the Model Context
+Protocol on stdio. Its tools are `state` and `history` (from a running `up`) and
+`dry_run`, and each declares its payload's schema as its `outputSchema`. It is
+read-only unless started with `--allow-run`, which adds `run`:
+
+```json
+{ "mcpServers": { "turborust": { "command": "turborust", "args": ["mcp"] } } }
+```
+
 ### Stopping
 
 ctrl-c, SIGTERM (`docker stop`, systemd, a cancelled CI job) and SIGHUP (a closed

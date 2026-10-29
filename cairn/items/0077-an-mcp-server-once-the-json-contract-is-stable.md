@@ -2,12 +2,13 @@
 id: 77
 title: An MCP server, once the JSON contract is stable
 type: feature
-status: backlog
+status: done
 milestone: later
 depends_on:
 - 78
 created: 2026-09-10
-updated: 2026-09-10
+updated: 2026-10-29
+claimed: 2026-10-29
 priority: p3
 effort: l
 area: cli
@@ -46,8 +47,20 @@ MCP is worth adding on top of that, and worth nothing without it.
 
 ## Acceptance criteria
 
-- [ ] `turborust mcp` serves the read-only surface over the existing control
+- [x] `turborust mcp` serves the read-only surface over the existing control
       socket
-- [ ] Mutating tools are opt-in and off by default
-- [ ] It reuses the `0078` schemas rather than defining a second set
-- [ ] It works against a running `up` and degrades usefully when none is running
+- [x] Mutating tools are opt-in and off by default
+- [x] It reuses the `0078` schemas rather than defining a second set
+- [x] It works against a running `up` and degrades usefully when none is running
+
+## 2026-10-29
+
+`turborust mcp`: MCP over stdio, newline-delimited JSON-RPC 2.0. Only what a tool server needs (`initialize`, `ping`, `tools/list`, `tools/call`) is written by hand in `src/mcp.rs`; no MCP crate was available, and the protocol subset is small enough that one would be a dependency for its own sake. It negotiates 2025-06-18, 2025-03-26 or 2024-11-05, and offers the newest to a client asking for anything else.
+
+- **Tools.** `state` and `history` ask a running `up` over the control socket, which gained a `State` request returning the overlay's snapshot. `dry_run` runs `turborust run --dry-run=json` as a subprocess, so it works with no `up` at all. `run` exists only under `--allow-run`; without it, a call to `run` is an unknown tool, not a refusal to argue with.
+- **No second set of shapes.** Every tool's `outputSchema` is `turborust schema --json <output>` for the payload it returns, and the result's `structuredContent` is that payload (the test compares them byte for byte). Subprocesses run with `--error-format json`, so a failure reaches the agent as a code and a message, not scraped prose.
+- **Degrading.** With no `up`, `state` and `history` return a tool error that says so and names `dry_run` as what still works. A tool error rather than a protocol error, so the model reads it.
+- **The opinion in this item held up in the building.** Almost all of the server is plumbing to payloads that already existed; the work that made this cheap was 0078's.
+
+Verified by hand against a live `up`: `state` shows `api` healthy; `history` shows `starting → spawned → healthy`; `run` on a task that panics returns exit 101 with the panic as an issue at `src/x.rs`. `an_agent_gets_contracted_answers_and_no_way_to_run_unless_allowed` pins the protocol, the schemas, the degraded answer and the opt-in.
+
