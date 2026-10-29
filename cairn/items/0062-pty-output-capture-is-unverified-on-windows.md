@@ -87,3 +87,5 @@ The reader now answers `ESC[1;1R` on Windows, once per query, unless a terminal 
 
 Confirmed on `windows-latest` (#52's CI): `captures_child_output_and_exit_code`, `stop_kills_the_whole_process_group` and `the_reader_answers_a_cursor_query` all pass, in a unit suite of 241 with nothing ignored. The unanswered cursor query was the whole cause. The item stays open for the configurable shell, the one criterion left.
 
+
+The configurable shell: `[project] shell`, or `shell` on a service or task. A name gets the flag that shell takes a command with (`-c`; `-Command` for pwsh and powershell; `/C` for cmd). An array is an exact argv with the command appended last. The shell is folded into the cache key only when one is set, so every existing key still hits, but the same text under another shell is another key. mise's `run_windows` (above) is covered by a per-node `shell` for most cases; a per-platform command was not added. What is left on this item is the last criterion, the integration fixtures running on Windows through the shell, tried separately because that is CI iteration and this is not.

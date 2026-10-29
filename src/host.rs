@@ -22,6 +22,8 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub struct SpawnRequest<'a> {
     pub name: &'a str,
     pub cmd: &'a str,
+    /// The shell argv `cmd` is appended to; `None` for the platform's.
+    pub shell: Option<&'a [String]>,
     pub cwd: &'a Path,
     pub env: &'a BTreeMap<String, String>,
     /// Strict environment: the child sees `env` and nothing else.
@@ -110,6 +112,7 @@ impl Host for Real {
         let h = proc::spawn_with(
             req.name,
             req.cmd,
+            req.shell,
             req.cwd,
             req.env,
             req.isolated,

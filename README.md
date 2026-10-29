@@ -238,6 +238,24 @@ The socket lives in a per-user directory, mode `0600`, named by a hash of the
 workspace. Not in `.turborust/`: Unix socket paths are capped near 104 bytes and a
 workspace a few directories deep overflows it, failing with a bare `EINVAL`.
 
+### Shell
+
+Commands run through `/bin/sh -c`, or `cmd /C` on Windows. Set another for the
+whole project or for one node:
+
+```toml
+[project]
+shell = "bash"                     # bash -c; "pwsh" gets -Command, "cmd" /C
+
+[tasks.lint]
+cmd   = "set -o pipefail; cargo clippy 2>&1 | tee clippy.log"
+shell = ["bash", "-eu", "-c"]      # an exact argv; the command goes last
+```
+
+A shell is part of a task's cache key when it is set, since the same text can
+mean something else under another shell. On Windows, `shell = "bash"` lets one
+config serve every platform through Git Bash.
+
 ### Environment
 
 A task's command runs in a **filtered environment** by default. Only a small safe
