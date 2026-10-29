@@ -17,13 +17,16 @@ use std::path::{Path, PathBuf};
 
 pub const SCHEMA: u32 = 1;
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Prediction {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    /// The version under its first name. Deprecated: read `schemaVersion`.
     pub schema: u32,
     pub tasks: Vec<TaskPrediction>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct TaskPrediction {
     pub task: String,
     pub command: String,
@@ -86,6 +89,7 @@ pub fn predict(engine: &Engine, cache: &Cache) -> Result<Prediction> {
         });
     }
     Ok(Prediction {
+        schema_version: SCHEMA,
         schema: SCHEMA,
         tasks,
     })
@@ -123,8 +127,11 @@ impl Prediction {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct RunSummary {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
+    /// The version under its first name. Deprecated: read `schemaVersion`.
     pub schema: u32,
     /// Seconds since the epoch. Not a formatted date: a consumer can format it,
     /// and a formatted one cannot be sorted reliably.
@@ -141,7 +148,7 @@ pub struct RunSummary {
     pub nodes: std::collections::BTreeMap<String, crate::state::Tally>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, schemars::JsonSchema)]
 pub struct TaskOutcomeRecord {
     pub task: String,
     pub cached: bool,
@@ -174,6 +181,7 @@ mod tests {
 
     fn prediction(tasks: Vec<TaskPrediction>) -> Prediction {
         Prediction {
+            schema_version: SCHEMA,
             schema: SCHEMA,
             tasks,
         }
@@ -229,6 +237,7 @@ mod tests {
         assert!(json.contains("\"schema\":1"), "{json}");
 
         let summary = RunSummary {
+            schema_version: SCHEMA,
             schema: SCHEMA,
             started_at: 1,
             duration_ms: 2,
@@ -250,6 +259,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("tr-sum-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let summary = RunSummary {
+            schema_version: SCHEMA,
             schema: SCHEMA,
             started_at: 1234,
             duration_ms: 10,

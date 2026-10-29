@@ -1,0 +1,156 @@
+#!/usr/bin/env python3
+"""Keeps the JSON output schemas under schemas/ honest (cairn 0078).
+
+The committed schemas are the contract. Two things can break it:
+
+  drift     the types changed and the committed schema was not regenerated,
+            so the contract describes output turborust no longer prints.
+  breakage  a field a consumer could rely on was removed, retyped or made
+            optional, and the payload's `schemaVersion` did not go up.
+
+An added field, or a new value of an existing string, is not breakage: the
+promise in docs/json.md is that a consumer must ignore what it does not know.
+
+    scripts/schemas                   check for drift
+    scripts/schemas --write           regenerate schemas/ from the types
+    scripts/schemas --against REF     also check for breakage since REF
+
+Builds turborust with cargo, so it checks the source in front of it.
+"""
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+DIR = ROOT / "schemas"
+OUTPUTS = ["dry-run", "summary", "verify", "cache", "state", "history", "error"]
+
+
+def generate(name):
+    out = subprocess.run(
+        ["cargo", "run", "--quiet", "--", "schema", "--json", name],
+        cwd=ROOT, check=True, capture_output=True, text=True,
+    ).stdout
+    return json.loads(out)
+
+
+def dump(schema):
+    return json.dumps(schema, indent=2) + "\n"
+
+
+def shape(schema):
+    """Every place a consumer can read a value from, with what it holds.
+
+    `{path: (types, required)}`, references resolved. A path is dotted, with
+    `[]` for an array's items and `{}` for a map's values.
+    """
+    defs = schema.get("$defs", {})
+    out = {}
+
+    def resolve(node):
+        seen = 0
+        while isinstance(node, dict) and "$ref" in node:
+            node = defs[node["$ref"].rsplit("/", 1)[-1]]
+            seen += 1
+            if seen > 50:
+                raise SystemExit("schemas: a $ref cycle")
+        return node
+
+    def types(node):
+        node = resolve(node)
+        found = set()
+        if "type" in node:
+            t = node["type"]
+            found |= set(t if isinstance(t, list) else [t])
+        if "const" in node and "type" not in node:
+            found.add(type(node["const"]).__name__)
+        if "enum" in node and "type" not in node:
+            found |= {"string" if isinstance(v, str) else type(v).__name__ for v in node["enum"]}
+        for key in ("anyOf", "oneOf"):
+            for alt in node.get(key, []):
+                found |= types(alt)
+        return found
+
+    def walk(node, path, required, depth):
+        if depth > 30:
+            raise SystemExit(f"schemas: {path} nests too deeply")
+        node = resolve(node)
+        if path:
+            out[path] = (frozenset(types(node)), required)
+        alts = [node] + [resolve(a) for k in ("anyOf", "oneOf") for a in node.get(k, [])]
+        for alt in alts:
+            needed = set(alt.get("required", []))
+            for name, sub in alt.get("properties", {}).items():
+                walk(sub, f"{path}.{name}" if path else name, name in needed, depth + 1)
+            if isinstance(alt.get("items"), dict):
+                walk(alt["items"], f"{path}[]", True, depth + 1)
+            for i, sub in enumerate(alt.get("prefixItems", [])):
+                walk(sub, f"{path}[{i}]", True, depth + 1)
+            if isinstance(alt.get("additionalProperties"), dict):
+                walk(alt["additionalProperties"], f"{path}{{}}", True, depth + 1)
+
+    walk(schema, "", True, 0)
+    return out
+
+
+def broken(old, new):
+    """What a consumer of `old` could rely on that `new` no longer promises."""
+    a, b = shape(old), shape(new)
+    found = []
+    for path, (types, required) in sorted(a.items()):
+        if path not in b:
+            found.append(f"`{path}` was removed")
+            continue
+        new_types, new_required = b[path]
+        lost = types - new_types
+        if lost:
+            found.append(f"`{path}` no longer holds {', '.join(sorted(lost))}")
+        if "null" in new_types and "null" not in types:
+            found.append(f"`{path}` may now be null")
+        if required and not new_required:
+            found.append(f"`{path}` is no longer always present")
+    return found
+
+
+def version(schema):
+    return schema.get("properties", {}).get("schemaVersion", {}).get("const", 0)
+
+
+def main(argv):
+    write = "--write" in argv
+    against = argv[argv.index("--against") + 1] if "--against" in argv else None
+    failed = False
+    DIR.mkdir(exist_ok=True)
+    for name in OUTPUTS:
+        path = DIR / f"{name}.json"
+        fresh = generate(name)
+        if write:
+            path.write_text(dump(fresh))
+        elif not path.exists() or path.read_text() != dump(fresh):
+            print(f"schemas/{name}.json is out of date: run scripts/schemas --write")
+            failed = True
+            continue
+        if against:
+            old = subprocess.run(
+                ["git", "show", f"{against}:schemas/{name}.json"],
+                cwd=ROOT, capture_output=True, text=True,
+            )
+            if old.returncode != 0:
+                continue  # new in this change; nothing to break
+            before = json.loads(old.stdout)
+            problems = broken(before, fresh)
+            if problems and version(fresh) <= version(before):
+                print(f"`{name}` changed incompatibly without raising its schemaVersion "
+                      f"(still {version(fresh)}):")
+                for p in problems:
+                    print(f"  - {p}")
+                print("  Raise it in Output::version (src/contract.rs), or keep the old field.")
+                failed = True
+    if not failed and not write:
+        print(f"{len(OUTPUTS)} schemas in sync" + (f", none broken since {against}" if against else ""))
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

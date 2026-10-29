@@ -302,7 +302,7 @@ pub fn hash_outputs(root: &Path, files: &[String]) -> Option<String> {
 }
 
 /// Where two byte streams first differ, and what the difference looks like.
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq, Eq, schemars::JsonSchema)]
 pub struct Divergence {
     /// Byte offset of the first difference.
     pub offset: u64,
@@ -397,7 +397,7 @@ pub struct Stats {
 }
 
 /// What the last eviction dropped, so a surprising miss can be explained.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Sweep {
     /// Seconds since the epoch.
     pub at: u64,

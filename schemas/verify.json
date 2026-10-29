@@ -1,0 +1,127 @@
+{
+  "$defs": {
+    "DifferingOutput": {
+      "properties": {
+        "divergence": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/Divergence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Where the two first differ, when both runs produced the file."
+        },
+        "first": {
+          "description": "Content hash from the first run; absent if only the second produced it.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "path": {
+          "type": "string"
+        },
+        "second": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "Divergence": {
+      "description": "Where two byte streams first differ, and what the difference looks like.",
+      "properties": {
+        "left_len": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "offset": {
+          "description": "Byte offset of the first difference.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "right_len": {
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "run": {
+          "description": "How many bytes differ from there to the end of the shorter run of\ndifference \u2014 enough to tell a timestamp from a reordered section.",
+          "format": "uint64",
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "offset",
+        "run",
+        "left_len",
+        "right_len"
+      ],
+      "type": "object"
+    },
+    "VerifyTask": {
+      "properties": {
+        "deterministic": {
+          "type": "boolean"
+        },
+        "differing": {
+          "items": {
+            "$ref": "#/$defs/DifferingOutput"
+          },
+          "type": "array"
+        },
+        "outputs": {
+          "description": "How many output files the first run produced.",
+          "format": "uint",
+          "minimum": 0,
+          "type": "integer"
+        },
+        "task": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task",
+        "deterministic",
+        "outputs",
+        "differing"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "`verify --json`.",
+  "properties": {
+    "deterministic": {
+      "description": "True when every task checked produced identical outputs twice.",
+      "type": "boolean"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    },
+    "tasks": {
+      "items": {
+        "$ref": "#/$defs/VerifyTask"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "deterministic",
+    "tasks"
+  ],
+  "title": "turborust verify output",
+  "type": "object"
+}

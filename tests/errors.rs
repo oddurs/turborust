@@ -138,3 +138,98 @@ fn run_summarize_writes_its_record_and_exits() {
     assert_eq!(issue["file"], "src/lib.rs", "{record}");
     assert_eq!(json["nodes"]["test"]["failures"], 1, "{record}");
 }
+
+/// Runs the binary in a fresh directory holding `config`, if any.
+fn turborust_in(tag: &str, config: Option<&str>, args: &[&str]) -> std::process::Output {
+    let dir = std::env::temp_dir().join(format!("turborust-{tag}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    if let Some(c) = config {
+        std::fs::write(dir.join("turborust.toml"), c).unwrap();
+    }
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_turborust"));
+    cmd.args(args)
+        .current_dir(&dir)
+        .env_remove("TURBORUST_ERROR_FORMAT");
+    for var in [
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_COMMON_DIR",
+    ] {
+        cmd.env_remove(var);
+    }
+    let out = cmd.output().expect("turborust runs");
+    let _ = std::fs::remove_dir_all(&dir);
+    out
+}
+
+#[test]
+fn a_failure_has_a_stable_code_under_error_format_json() {
+    // Cover for cairn 0078: a non-zero exit a pipeline can branch on without
+    // reading English.
+    let fine = "[tasks.a]\ncmd = \"true\"\n";
+    let cases = [
+        ("no-config", None, "plan", "config-not-found"),
+        (
+            "bad-toml",
+            Some("[tasks.a\ncmd = 1"),
+            "plan",
+            "config-invalid",
+        ),
+        (
+            "unknown-dep",
+            Some("[tasks.a]\ncmd = \"true\"\ndepends_on = [\"nope\"]\n"),
+            "plan",
+            "config-invalid",
+        ),
+        ("unknown-target", Some(fine), "run", "plan-invalid"),
+        ("nothing-up", Some(fine), "connect", "not-running"),
+    ];
+    for (tag, config, command, code) in cases {
+        let args: &[&str] = match command {
+            "run" => &["run", "nope", "--error-format", "json"],
+            "connect" => &["connect", "a", "--error-format", "json"],
+            _ => &["plan", "--error-format", "json"],
+        };
+        let out = turborust_in(tag, config, args);
+        assert_eq!(out.status.code(), Some(1), "{tag}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let report: serde_json::Value = serde_json::from_str(stderr.trim())
+            .unwrap_or_else(|e| panic!("{tag}: stderr is not one JSON value ({e}):\n{stderr}"));
+        assert_eq!(report["schemaVersion"], 1, "{tag}");
+        assert_eq!(report["error"]["code"], code, "{tag}: {stderr}");
+        assert!(
+            report["error"]["message"]
+                .as_str()
+                .is_some_and(|m| !m.is_empty())
+        );
+    }
+
+    // The text form is what it always was.
+    let out = turborust_in("no-config-text", None, &["plan"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("Error: no turborust.toml found"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn every_json_payload_says_which_version_it_is() {
+    let config = "[tasks.a]\ncmd = \"true\"\ninputs = [\"turborust.toml\"]\n";
+    for args in [
+        &["run", "a", "--dry-run=json"][..],
+        &["cache", "--json"][..],
+    ] {
+        let out = turborust_in("versioned", Some(config), args);
+        assert!(
+            out.status.success(),
+            "{args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let v: serde_json::Value =
+            serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+        assert_eq!(v["schemaVersion"], 1, "{args:?}: {v}");
+    }
+}

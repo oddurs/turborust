@@ -65,13 +65,21 @@ turborust doctor            what is costing you seconds on every rebuild
 turborust plan              the resolved graph, with derived globs
 turborust connect <node>    attach this terminal to a running process
 turborust init              scaffold a config from your Cargo workspace and Procfile
-turborust schema            JSON Schema for turborust.toml, for editor completion
+turborust schema            JSON Schema for turborust.toml (--json <output>: for its JSON)
 turborust completions <sh>  shell completion script
 turborust man               the man page
 turborust verify [task…]    run tasks twice and prove their outputs match
 turborust cache             what the cache is holding, and what it last dropped
 turborust clean             drop cached task results
 ```
+
+### Scripting against it
+
+`run --dry-run=json`, `run --summarize`, `verify --json`, `cache --json` and the
+overlay's endpoints print JSON with a schema and a `schemaVersion`, and
+`--error-format json` makes a failure one JSON value on stderr with a stable
+`code`. `turborust schema --json <output>` prints each schema. What may change
+without a new version is in [docs/json.md](docs/json.md).
 
 ### Stopping
 
@@ -102,6 +110,41 @@ $ turborust why check
 ```
 
 Content hashes, not mtimes — so `git checkout` does not invalidate the world.
+
+### Where the time went
+
+`doctor` reads your configuration and says what a good one looks like.
+`doctor --profile` reads what actually happened:
+
+```
+$ turborust doctor --profile --since 7d
+
+  last 7d — 41m of waiting across 3 nodes
+
+  build          19m   34 runs   cache 3/34
+      keyed on env `PROFILE`, which changed on 28 of 31 misses
+      → if `PROFILE` does not change the output, move it from `env_keys` to `pass_through_env`
+
+  check           8m   34 runs   cache 30/34
+      its sources changed on 4 of 4 misses: the cache doing its job
+
+  last cold build   94s  (target/cargo-timings/cargo-timing-….html)
+      slowest crates: serde_derive 21s, sqlx-macros 17s, syn 10s
+      final binaries (compile + link): 18s
+```
+
+- **Per task:** time, runs, hits, and the most common reason for a miss.
+- **Ranking:** tasks whose misses have a cause you can change come first, ahead
+  of ones that cost more for reasons that are expected, like edited sources.
+- **Regressions:** a task whose builds got slower than its earlier runs says
+  by how much.
+- **Cold builds:** where one went comes from the newest `cargo build --timings`
+  report under `target/`. Run that once; turborust does not start a cold build
+  by itself.
+
+Each task run is appended to `.turborust/profile/runs.jsonl`, which stays under
+4 MiB by dropping its older half. It is local and never sent anywhere. Turn it
+off with `[project] profile = false` or `TURBORUST_PROFILE=off`.
 
 ## Config
 

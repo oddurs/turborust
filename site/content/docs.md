@@ -199,6 +199,12 @@ The largest win is almost always the linker: incremental rebuilds are link-bound
 because codegen is cached and linking is not. `doctor` prints the exact snippet
 and writes nothing unless asked — build configuration is your call.
 
+`turborust doctor --profile` says where the time actually went: per task, how
+long it took, how often it hit, and the most common reason it missed, ranked by
+what you can change. It reads a log of runs kept under `.turborust/`, locally,
+and the newest `cargo build --timings` report for where a cold build went.
+`[project] profile = false` turns the log off.
+
 ## This site
 
 The page you are reading is built by a small Rust generator and served by

@@ -4,6 +4,7 @@
 //! Keeping them in the same dependency space is the point — a service can wait on
 //! a task (build before serve) and a task can wait on a service (migrate after db).
 
+use crate::contract::{Code, Failure};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -49,6 +50,10 @@ pub struct Project {
     pub watch: Option<WatchConfig>,
     /// The longest any task may run, unless it sets its own `timeout`.
     pub task_timeout: Option<String>,
+    /// Log each task run under `.turborust/` for `turborust doctor --profile`.
+    /// Local only, never sent anywhere. Default on; `TURBORUST_PROFILE=off`
+    /// also turns it off.
+    pub profile: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema, Clone, Default)]
@@ -74,6 +79,7 @@ impl Default for Project {
             env_file: None,
             watch: None,
             task_timeout: None,
+            profile: None,
         }
     }
 }
@@ -790,10 +796,20 @@ impl Workspace {
             Some(p) => p.to_path_buf(),
             None => find_config()?,
         };
-        let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("reading {}", path.display()))?;
-        let config: Config =
-            toml::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
+        let text = std::fs::read_to_string(&path).map_err(|e| {
+            let code = if e.kind() == std::io::ErrorKind::NotFound {
+                Code::ConfigNotFound
+            } else {
+                Code::ConfigInvalid
+            };
+            Failure::coded(
+                code,
+                anyhow::Error::from(e).context(format!("reading {}", path.display())),
+            )
+        })?;
+        let config: Config = toml::from_str(&text)
+            .with_context(|| format!("parsing {}", path.display()))
+            .map_err(|e| Failure::coded(Code::ConfigInvalid, e))?;
         let root = path
             .parent()
             .map(|p| p.to_path_buf())
@@ -805,7 +821,8 @@ impl Workspace {
             config,
             source: Some(text),
         };
-        ws.validate()?;
+        ws.validate()
+            .map_err(|e| Failure::coded(Code::ConfigInvalid, e))?;
         Ok(ws)
     }
 
@@ -1002,7 +1019,12 @@ fn find_config() -> Result<PathBuf> {
             }
         }
         if !dir.pop() {
-            bail!("no turborust.toml found in this directory or any parent (try `turborust init`)");
+            return Err(Failure::coded(
+                Code::ConfigNotFound,
+                anyhow::anyhow!(
+                    "no turborust.toml found in this directory or any parent (try `turborust init`)"
+                ),
+            ));
         }
     }
 }
@@ -1155,7 +1177,8 @@ pub fn parse_duration(s: &str) -> Result<Duration> {
         "s" => n * 1_000.0,
         "m" => n * 60_000.0,
         "h" => n * 3_600_000.0,
-        other => bail!("unknown duration unit `{other}` in `{s}` (use ms, s, m, h)"),
+        "d" => n * 86_400_000.0,
+        other => bail!("unknown duration unit `{other}` in `{s}` (use ms, s, m, h, d)"),
     };
     // Refused rather than clamped. `-5s` used to become zero and `inf` or a huge
     // number saturated, and every deadline is `now + duration`: on platforms

@@ -1,0 +1,75 @@
+{
+  "$defs": {
+    "Code": {
+      "description": "What kind of failure this was, so a consumer can branch without reading\nEnglish. A new code may be added in any release; one is never renamed.",
+      "oneOf": [
+        {
+          "const": "config-not-found",
+          "description": "No `turborust.toml` here or in any parent.",
+          "type": "string"
+        },
+        {
+          "const": "config-invalid",
+          "description": "The config could not be read, parsed or validated.",
+          "type": "string"
+        },
+        {
+          "const": "plan-invalid",
+          "description": "The config is valid, but no plan could be built from it: an unknown\ntarget, a cycle, a setting that contradicts another.",
+          "type": "string"
+        },
+        {
+          "const": "not-running",
+          "description": "The command needs a running `turborust up`, and there is none.",
+          "type": "string"
+        },
+        {
+          "const": "error",
+          "description": "Anything not yet given a code of its own.",
+          "type": "string"
+        }
+      ]
+    },
+    "ErrorBody": {
+      "properties": {
+        "causes": {
+          "description": "What it was caused by, outermost first.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "code": {
+          "$ref": "#/$defs/Code"
+        },
+        "message": {
+          "description": "The outermost message, as the text form prints it first.",
+          "type": "string"
+        }
+      },
+      "required": [
+        "code",
+        "message",
+        "causes"
+      ],
+      "type": "object"
+    }
+  },
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "What a failed command prints on stderr under `--error-format json`.",
+  "properties": {
+    "error": {
+      "$ref": "#/$defs/ErrorBody"
+    },
+    "schemaVersion": {
+      "const": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "error"
+  ],
+  "title": "turborust error output",
+  "type": "object"
+}

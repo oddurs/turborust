@@ -260,7 +260,7 @@ impl Entry {
 }
 
 /// One history entry as the control socket and the dashboard serve it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize, schemars::JsonSchema)]
 pub struct HistoryRecord {
     pub seq: u64,
     /// Milliseconds since the session began.
@@ -271,7 +271,7 @@ pub struct HistoryRecord {
 
 /// What a node has been through, counted as it happened — so it survives the
 /// history being summarised (cairn 0110).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, schemars::JsonSchema)]
 pub struct Tally {
     pub restarts: u32,
     pub failures: u32,
@@ -535,7 +535,7 @@ impl LogStore {
 }
 
 /// What the last task run did — the overlay's "why did that happen" surface.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct BuildInfo {
     pub node: String,
     pub cached: bool,
@@ -546,7 +546,7 @@ pub struct BuildInfo {
     pub changed: Vec<ChangedFile>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct ChangedFile {
     pub path: String,
     pub from: String,
@@ -554,7 +554,7 @@ pub struct ChangedFile {
 }
 
 /// One node, flattened for the wire.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct NodeSnapshot {
     pub name: String,
     pub kind: &'static str,
@@ -579,8 +579,10 @@ pub struct LogSnapshot {
     pub text: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 pub struct Snapshot {
+    #[serde(rename = "schemaVersion")]
+    pub schema_version: u32,
     /// Aggregate: "error" | "building" | "ready" | "stopped".
     pub status: &'static str,
     pub nodes: Vec<NodeSnapshot>,
@@ -592,7 +594,7 @@ pub struct Snapshot {
     pub shutting_down: bool,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
 pub struct IssueSnapshot {
     pub node: String,
     #[serde(flatten)]
@@ -711,6 +713,7 @@ impl AppState {
         };
 
         Snapshot {
+            schema_version: crate::contract::Output::State.version(),
             status,
             nodes,
             issues,

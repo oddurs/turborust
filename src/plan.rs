@@ -96,6 +96,8 @@ pub struct Plan {
     pub root: PathBuf,
     pub concurrency: Option<usize>,
     pub notify: bool,
+    /// Whether task runs are logged for `doctor --profile` (cairn 0075).
+    pub profile: bool,
     /// Direct dependents of each node — the reverse of `depends_on`.
     ///
     /// Built once here because three separate questions need it: which nodes a
@@ -255,6 +257,11 @@ fn env_files(
 }
 
 pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
+    resolve_unchecked(ws, targets)
+        .map_err(|e| crate::contract::Failure::coded(crate::contract::Code::PlanInvalid, e))
+}
+
+fn resolve_unchecked(ws: &Workspace, targets: &[String]) -> Result<Plan> {
     let metadata = Metadata::load(&ws.root)?;
 
     let roots: Vec<String> = if targets.is_empty() {
@@ -294,6 +301,7 @@ pub fn resolve(ws: &Workspace, targets: &[String]) -> Result<Plan> {
         root: ws.root.clone(),
         concurrency: ws.config.project.concurrency,
         notify: ws.config.project.notify,
+        profile: crate::profile::enabled(ws.config.project.profile),
         dependents,
         global: crate::global::GlobalHash::compute(&ws.root, ws.source.as_deref()),
         nodes,
