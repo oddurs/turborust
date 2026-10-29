@@ -71,3 +71,6 @@ and history — which is not worth trading away for it.
 `group_alive` now asks `killpg(pgid, 0)` first: no member at all is the usual
 answer after a stop, and a `/proc` scan per stop had pushed stopping fifty
 services from 16ms to 30ms. Back to 14ms.
+
+A durability soak of the whole suite with this in (4 workers × 25 rounds, 900
+test-binary runs) had no failures.
