@@ -521,8 +521,8 @@ Design constraints worth knowing about:
 ## Roadmap
 
 Tracked with `cairn` as Markdown files under `cairn/items`, which are reviewed
-in pull requests like anything else, and rendered to [ROADMAP.md](ROADMAP.md) on
-`main` after each merge.
+in pull requests like anything else, and rendered to
+[ROADMAP.md](https://github.com/oddurs/turborust/blob/roadmap/ROADMAP.md) after each merge.
 
 - **v0.0** — what already exists, recorded after the fact, including the bugs
   found while building it

@@ -27,7 +27,7 @@ cairn set <ID> status=<STATUS>    # also labels+=x, or any field below
 cairn note <ID> "<TEXT>"          # append reasoning; never replaces
 cairn close <ID>
 cairn check                       # validate; run before finishing
-cairn render                      # preview ROADMAP.md locally (do not commit it)
+cairn render                      # preview ROADMAP.md locally (it is gitignored)
 ```
 
 ### Schema
@@ -47,7 +47,7 @@ cairn render                      # preview ROADMAP.md locally (do not commit it
 
 1. Before starting work, find or create the item and set it to an active status.
 2. Use the fields above rather than inventing new ones; add new fields to `cairn.toml` first.
-3. Never hand-edit the generated roadmap file — change items; `main` re-renders it after merge.
+3. Never hand-edit the generated roadmap — change items; it is re-rendered after merge.
 4. `cairn check` must pass before the work is considered done.
 
 
@@ -63,8 +63,9 @@ cairn render                      # preview ROADMAP.md locally (do not commit it
   were found that way.
 - `cargo fmt`, `cargo clippy --all-targets` and `cairn check` must all be clean;
   CI enforces all three.
-- `ROADMAP.md` is rendered on `main` by a workflow after each merge. Do not
-  render or commit it in a branch: CI rejects a pull request that edits it,
+- `ROADMAP.md` is not tracked on `main`. A workflow renders it after each merge
+  and publishes it on the `roadmap` branch (https://github.com/oddurs/turborust/blob/roadmap/ROADMAP.md).
+  Locally it is a gitignored preview; CI rejects a pull request that tracks it,
   because two branches that each close an item would otherwise conflict on it.
 
 

@@ -1,9 +1,13 @@
 name: roadmap
 
 # Renders ROADMAP.md from the items after every merge that touches them, and
-# commits the result to main. Rendering here instead of in each pull request is
-# what lets two pull requests that close items merge in either order, or at
-# once (cairn 0108).
+# publishes it on the `roadmap` branch. Not on main: main only takes changes
+# through pull requests with passing checks, which a bot commit cannot have
+# (cairn 0109), and a render carried in every pull request is what made two
+# pull requests that close items conflict (0108).
+#
+# The branch is main plus one commit adding the render, replaced on every run,
+# so it never grows a history of its own and always reads as "main, rendered".
 on:
   push:
     branches: [main]
@@ -13,8 +17,8 @@ on:
 permissions:
   contents: write
 
-# One render at a time, and never cancelled: a cancelled run could leave main
-# behind its items until the next merge.
+# One render at a time, and never cancelled: a cancelled run could leave the
+# published roadmap behind its items until the next merge.
 concurrency:
   group: roadmap-render
   cancel-in-progress: false
@@ -26,33 +30,21 @@ jobs:
       - uses: actions/checkout@v7
         with:
           # The tip of main at run time, not the commit that triggered the run:
-          # a run queued behind another must render on top of its result.
+          # a run queued behind another must render what main now says.
           ref: main
       - uses: dtolnay/rust-toolchain@stable
       # Same pin as the CI check, for the same reason: a cairn release must not
-      # change what gets committed.
+      # change what gets published.
       - name: install cairn
         run: cargo install --locked --git https://github.com/oddurs/cairn --tag v0.3.0 cairn-md
-      - name: render and commit
+      - name: render and publish
         run: |
+          cairn check
+          cairn render
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          # A merge can land while this runs; then the push is rejected, and
-          # rendering again on the new tip is the whole fix.
-          for attempt in 1 2 3; do
-            git fetch --quiet origin main
-            git reset --quiet --hard origin/main
-            cairn check
-            cairn render
-            if git diff --quiet -- ROADMAP.md; then
-              echo "ROADMAP.md already matches the items"
-              exit 0
-            fi
-            git commit --quiet -m "chore(roadmap): render" -- ROADMAP.md
-            if git push --quiet origin HEAD:main; then
-              exit 0
-            fi
-            sleep $((attempt * 5))
-          done
-          echo "::error::could not push the rendered roadmap after 3 attempts"
-          exit 1
+          git checkout --quiet -B roadmap
+          git add --force ROADMAP.md
+          git commit --quiet -m "chore(roadmap): render $(git rev-parse --short HEAD)"
+          git push --quiet --force origin roadmap
+          echo "published: https://github.com/${GITHUB_REPOSITORY}/blob/roadmap/ROADMAP.md"
