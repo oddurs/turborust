@@ -128,6 +128,10 @@ pub struct Service {
     pub ignore: Vec<String>,
     #[serde(default)]
     pub restart: RestartPolicy,
+    /// Give up after this many restarts in a row for crashing, and stay failed
+    /// until a change or a manual restart. A run that stayed up longer than
+    /// `backoff_max` starts the count again. Default: never give up.
+    pub max_restarts: Option<u32>,
     /// What a watched-file change does to this service.
     #[serde(default)]
     pub on_change: OnChange,

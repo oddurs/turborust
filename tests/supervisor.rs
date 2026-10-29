@@ -1346,3 +1346,97 @@ async fn with_polling_an_edit_restarts_its_service_once() {
     assert_eq!(h.restarts("api"), before + 1, "one edit, one restart");
     h.shutdown().await;
 }
+
+fn runs_in(h: &Harness) -> usize {
+    std::fs::read_to_string(h.path("runs"))
+        .map(|s| s.lines().count())
+        .unwrap_or(0)
+}
+
+#[tokio::test]
+async fn a_crash_loop_gives_up_after_max_restarts_and_an_edit_brings_it_back() {
+    // Cover for cairn 0096: a command that can never work used to be restarted,
+    // and reported failing, forever.
+    let mut h = Harness::start(
+        "crashloop",
+        r#"
+        [services.api]
+        cmd = "echo . >> runs; exit 3"
+        restart = "always"
+        max_restarts = 2
+        backoff_min = "10ms"
+        watch = ["src/**"]
+        debounce = "60ms"
+        "#,
+        &["api"],
+    )
+    .seed("src")
+    .with_watcher();
+
+    h.wait_for("api given up", |st| {
+        st.nodes["api"]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("gave up after 2 restart(s)"))
+    })
+    .await;
+    assert!(matches!(h.status("api"), Status::Failed(3)));
+    assert_eq!(runs_in(&h), 3, "the first run and two restarts");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(runs_in(&h), 3, "restarted after giving up");
+
+    // A change is a new attempt with a fresh count, not one more crash.
+    std::fs::write(h.path("src/a.rs"), "// fixed?").unwrap();
+    h.wait_for("three more runs", |_| runs_in(&h) >= 6).await;
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert_eq!(runs_in(&h), 6, "the edit's attempt has the same allowance");
+    assert!(h.reason("api").contains("gave up"), "{}", h.reason("api"));
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn a_run_that_lasted_is_not_part_of_a_crash_loop() {
+    // The third run stays up longer than backoff_max, so the crash that ends
+    // it starts the count again: two more restarts before giving up. The
+    // margins are wide both ways: a quick crash is a shell starting, which on
+    // a loaded CI runner took over 200ms and was counted as having lasted.
+    let mut h = Harness::start(
+        "crash-settled",
+        r#"
+        [services.api]
+        cmd = "n=$(cat runs 2>/dev/null | wc -l); echo . >> runs; if [ $n -eq 2 ]; then sleep 2.5; fi; exit 3"
+        restart = "always"
+        max_restarts = 2
+        backoff_min = "10ms"
+        backoff_max = "1s"
+        "#,
+        &["api"],
+    );
+    h.wait_for("api given up", |st| {
+        st.nodes["api"]
+            .reason
+            .as_deref()
+            .is_some_and(|r| r.contains("gave up"))
+    })
+    .await;
+    assert_eq!(runs_in(&h), 5);
+    h.shutdown().await;
+}
+
+#[tokio::test]
+async fn without_max_restarts_a_crash_loop_keeps_trying() {
+    let mut h = Harness::start(
+        "crash-forever",
+        r#"
+        [services.api]
+        cmd = "echo . >> runs; exit 3"
+        restart = "always"
+        backoff_min = "10ms"
+        backoff_max = "20ms"
+        "#,
+        &["api"],
+    );
+    h.wait_for("many runs", |_| runs_in(&h) >= 8).await;
+    assert!(!h.reason("api").contains("gave up"));
+    h.shutdown().await;
+}

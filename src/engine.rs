@@ -1125,6 +1125,7 @@ async fn supervise(
 ) {
     let name = node.name.clone();
     let mut backoff = node.backoff_min;
+    let mut crashes = CrashCount::new(&node);
 
     loop {
         // 1. Block until every dependency is ready — while staying answerable.
@@ -1217,11 +1218,20 @@ async fn supervise(
                 if node.restart == crate::config::RestartPolicy::Never {
                     return;
                 }
+                if crashes.exhausted(Duration::ZERO) {
+                    drop(slot);
+                    if !give_up(&engine, &node, &seen, &mut ctl, &mut crashes, 127).await {
+                        return;
+                    }
+                    backoff = node.backoff_min;
+                    continue;
+                }
                 tokio::time::sleep(backoff).await;
                 backoff = (backoff * 2).min(node.backoff_max);
                 continue;
             }
         };
+        let started = Instant::now();
         let handle = Arc::new(handle);
         engine.register_handle(&name, handle.clone());
         {
@@ -1361,6 +1371,7 @@ async fn supervise(
                 let _ = handle.stop(node.stop_timeout).await;
                 engine.forget_handle(&name);
                 backoff = node.backoff_min;
+                crashes.reset();
                 continue;
             }
             StopReason::Exited(code) => {
@@ -1388,6 +1399,13 @@ async fn supervise(
                         None => return,
                     }
                 }
+                if crashes.exhausted(started.elapsed()) {
+                    if !give_up(&engine, &node, &seen, &mut ctl, &mut crashes, code).await {
+                        return;
+                    }
+                    backoff = node.backoff_min;
+                    continue;
+                }
                 // Exponential backoff bounded by `backoff_max`: a service that
                 // crashes instantly must not become a fork bomb.
                 engine.set(&name, Status::Backoff(backoff));
@@ -1405,12 +1423,81 @@ async fn supervise(
                     Some(Ctl::Restart(r)) => {
                         engine.log(&name, format!("restarting: {r}"));
                         backoff = node.backoff_min;
+                        crashes.reset();
                     }
                     _ => {}
                 }
                 continue;
             }
         }
+    }
+}
+
+/// Crash restarts in a row, against `max_restarts`.
+struct CrashCount {
+    limit: Option<u32>,
+    /// A run longer than this was not part of a crash loop.
+    settled: Duration,
+    restarts: u32,
+}
+
+impl CrashCount {
+    fn new(node: &Node) -> CrashCount {
+        CrashCount {
+            limit: node.max_restarts,
+            settled: node.backoff_max,
+            restarts: 0,
+        }
+    }
+
+    /// Records a crash after a run of `ran`, and says whether the restart it
+    /// would earn is one too many.
+    fn exhausted(&mut self, ran: Duration) -> bool {
+        if ran > self.settled {
+            self.restarts = 0;
+        }
+        let Some(limit) = self.limit else {
+            return false;
+        };
+        if self.restarts >= limit {
+            return true;
+        }
+        self.restarts += 1;
+        false
+    }
+
+    fn reset(&mut self) {
+        self.restarts = 0;
+    }
+}
+
+/// Parks a node that has used up its restarts until a change or a manual
+/// restart asks for it again. `false` means the supervisor should end.
+async fn give_up(
+    engine: &Engine,
+    node: &Node,
+    seen: &[u64],
+    ctl: &mut ctl::Receiver,
+    crashes: &mut CrashCount,
+    code: i32,
+) -> bool {
+    let name = node.name.as_str();
+    let why = format!(
+        "gave up after {} restart(s) in a row; waiting for a change or a manual restart",
+        crashes.restarts
+    );
+    engine.log(name, why.clone());
+    engine.set(name, Status::Failed(code));
+    if let Some(n) = engine.state.lock().unwrap().nodes.get_mut(name) {
+        n.reason = Some(why);
+    }
+    match wait_for_rerun(engine, &node.depends_on, seen, ctl).await {
+        Some(reason) => {
+            engine.log(name, format!("restarting: {reason}"));
+            crashes.reset();
+            true
+        }
+        None => false,
     }
 }
 

@@ -62,6 +62,8 @@ pub struct Node {
     pub timeout: Option<Duration>,
     pub backoff_min: Duration,
     pub backoff_max: Duration,
+    /// Crash restarts allowed in a row before giving up. Services only.
+    pub max_restarts: Option<u32>,
     /// Set when globs came from cargo rather than the config file, so `why` can
     /// say where the watch set came from.
     pub derived_from_crate: Option<String>,
@@ -391,6 +393,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             timeout: None,
             backoff_min: pd(&s.backoff_min)?,
             backoff_max: pd(&s.backoff_max)?,
+            max_restarts: s.max_restarts,
             derived_from_crate: derived,
         });
     }
@@ -468,6 +471,7 @@ fn resolve_node(ws: &Workspace, meta: Option<&Metadata>, name: &str) -> Result<N
             .transpose()?,
         backoff_min: pd("250ms")?,
         backoff_max: pd("30s")?,
+        max_restarts: None,
         derived_from_crate: derived,
     })
 }

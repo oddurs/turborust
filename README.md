@@ -347,6 +347,25 @@ it is restarted instead, so a hang heals itself. Liveness pauses while a
 `reload = "self"` process is rebuilding, since it is not expected to answer
 then.
 
+### Crash loops
+
+`restart = "always"` restarts a crashed service with exponential backoff,
+starting at `backoff_min` (default `250ms`) and doubling up to `backoff_max`
+(default `30s`). On its own that never stops, which is right for a flaky
+dependency and wrong for a typo:
+
+```toml
+[services.api]
+restart      = "always"
+max_restarts = 5
+```
+
+After five restarts in a row for crashing, the service stays **failed**, saying
+"gave up after 5 restart(s) in a row", until a watched file changes or you
+restart it from the TUI or the overlay. Either one is a new attempt with a fresh
+count. A run that stayed up longer than `backoff_max` was not part of a loop, so
+the crash that ends it starts the count again.
+
 ### Processes that reload themselves
 
 `dx serve`, `cargo leptos watch` and `trunk serve` watch your sources and rebuild

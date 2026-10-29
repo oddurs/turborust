@@ -193,11 +193,10 @@ Good ideas without a date yet.
 
 ## Unscheduled
 
-`########··` 73% · 11 of 15 done
+`########··` 80% · 12 of 15 done
 
 ### backlog
 
-- [ ] `0096` A crash loop never gives up <sup>feature · p3</sup>
 - [ ] `0097` init cannot start from a Procfile <sup>feature · p3</sup>
 - [ ] `0098` A command cannot see which files changed <sup>feature · p3</sup>
 - [ ] `0101` An edit right after the watch starts can be missed <sup>bug · p2</sup>
@@ -215,4 +214,5 @@ Good ideas without a date yet.
 - [x] `0093` There is no way to load a .env file <sup>feature · p1</sup>
 - [x] `0094` No polling fallback where file events do not arrive <sup>feature · p2</sup>
 - [x] `0095` A task that hangs hangs the run <sup>feature · p2</sup>
+- [x] `0096` A crash loop never gives up <sup>feature · p3</sup>
 

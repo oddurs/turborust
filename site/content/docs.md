@@ -82,6 +82,9 @@ liveness = { http = "http://127.0.0.1:8788/healthz", every = "10s", failures = 3
 Three misses in a row make the service unhealthy and tell its dependents; an
 answer brings it back. With `restart = "always"` it is restarted instead.
 
+`max_restarts = 5` stops a crash loop: after five restarts in a row the service
+stays failed until a change or a manual restart.
+
 A process that rebuilds itself — `dx serve`, `cargo leptos watch`, `trunk serve`
 — is never restarted for a change, but stays supervised:
 
