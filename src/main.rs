@@ -541,7 +541,7 @@ async fn print_history(ws: &Workspace, target: &str) {
 }
 
 fn explain(ws: &Workspace, target: &str) -> Result<i32> {
-    let plan = Arc::new(plan::resolve(&ws, &[target.to_string()])?);
+    let plan = Arc::new(plan::resolve(ws, &[target.to_string()])?);
     let node = plan.get(target)?.clone();
     let cache = Arc::new(Cache::new(&ws.store_dir())?);
     let (engine, _rx) = Engine::new(plan.clone(), cache.clone());
