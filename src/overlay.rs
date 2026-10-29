@@ -14,6 +14,8 @@ pub const STATE_PATH: &str = "/__turborust/state";
 pub const LOGS_PATH: &str = "/__turborust/logs";
 pub const RESTART_PATH: &str = "/__turborust/restart/{node}";
 pub const RELOAD_PATH: &str = "/__turborust/reload";
+/// What has happened, as JSON: `?node=` to narrow it, `?limit=` to bound it.
+pub const HISTORY_PATH: &str = "/__turborust/history";
 
 pub const JS: &str = include_str!("../assets/overlay.js");
 pub const CSS: &str = include_str!("../assets/overlay.css");

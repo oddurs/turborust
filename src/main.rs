@@ -164,7 +164,7 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Doctor { fix } => cmd_doctor(cli.config.as_deref(), fix),
         Cmd::Plan => cmd_plan(cli.config.as_deref()),
         Cmd::Graph { format, with_cache } => cmd_graph(cli.config.as_deref(), &format, with_cache),
-        Cmd::Why { target } => cmd_why(cli.config.as_deref(), &target),
+        Cmd::Why { target } => cmd_why(cli.config.as_deref(), &target).await,
         Cmd::Verify { targets, json } => cmd_verify(cli.config.as_deref(), targets, json).await,
         Cmd::Connect { node } => {
             let ws = load(cli.config.as_deref())?;
@@ -511,8 +511,36 @@ fn human(n: u64) -> String {
 
 /// The feature the whole design exists to support: a straight answer to
 /// "why did that rebuild?"
-fn cmd_why(config: Option<&std::path::Path>, target: &str) -> Result<i32> {
+async fn cmd_why(config: Option<&std::path::Path>, target: &str) -> Result<i32> {
     let ws = load(config)?;
+    let code = explain(&ws, target)?;
+    print_history(&ws, target).await;
+    Ok(code)
+}
+
+/// What a running `up` has seen happen to `target`, if one is running here.
+/// Silence otherwise: `why` is about the cache first, and needs no server.
+async fn print_history(ws: &Workspace, target: &str) {
+    const SHOWN: usize = 15;
+    let Ok(Some(entries)) = turborust::control::history(&ws.cache_dir(), Some(target), SHOWN).await
+    else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    println!("  \u{1b}[2mrecently, in the running `up`:\u{1b}[0m");
+    for e in &entries {
+        println!(
+            "      {:>8}  {}",
+            turborust::state::fmt_dur(std::time::Duration::from_millis(e.ms)),
+            e.what
+        );
+    }
+    println!();
+}
+
+fn explain(ws: &Workspace, target: &str) -> Result<i32> {
     let plan = Arc::new(plan::resolve(&ws, &[target.to_string()])?);
     let node = plan.get(target)?.clone();
     let cache = Arc::new(Cache::new(&ws.store_dir())?);
@@ -707,6 +735,7 @@ async fn cmd_run(
             global: plan.global.settled(),
             tasks: engine.outcomes(),
             issues: engine.state.lock().unwrap().snapshot().issues,
+            nodes: engine.state.lock().unwrap().history.tallies().clone(),
         };
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());

@@ -137,6 +137,8 @@ pub struct RunSummary {
     /// warnings and failing tests — with the node it came from. Additive, so
     /// the schema version stands.
     pub issues: Vec<crate::state::IssueSnapshot>,
+    /// Restarts and failures per node, counted from the run's history.
+    pub nodes: std::collections::BTreeMap<String, crate::state::Tally>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -234,6 +236,7 @@ mod tests {
             global: crate::global::GlobalHash::default(),
             tasks: vec![],
             issues: Vec::new(),
+            nodes: Default::default(),
         };
         assert!(
             serde_json::to_string(&summary)
@@ -254,6 +257,7 @@ mod tests {
             global: crate::global::GlobalHash::default(),
             tasks: vec![],
             issues: Vec::new(),
+            nodes: Default::default(),
         };
         let path = write(&dir, &summary).unwrap();
         assert!(path.ends_with("1234.json"));

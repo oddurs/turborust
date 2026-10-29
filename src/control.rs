@@ -141,6 +141,12 @@ fn runtime_dir(base: PathBuf) -> PathBuf {
 pub enum Request {
     /// Attach to a node's terminal.
     Attach { node: String, protocol: u32 },
+    /// The newest history entries, for one node or for all (cairn 0110).
+    History {
+        node: Option<String>,
+        limit: usize,
+        protocol: u32,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -148,6 +154,8 @@ pub struct Response {
     pub ok: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<Vec<crate::state::HistoryRecord>>,
 }
 
 impl Response {
@@ -155,14 +163,26 @@ impl Response {
         Response {
             ok: true,
             error: None,
+            history: None,
         }
     }
     fn err(msg: impl Into<String>) -> Self {
         Response {
             ok: false,
             error: Some(msg.into()),
+            history: None,
         }
     }
+}
+
+/// Refuses a client of another protocol version, plainly.
+fn version_mismatch(protocol: u32) -> Option<Response> {
+    (protocol != PROTOCOL).then(|| {
+        Response::err(format!(
+            "protocol {protocol} but this turborust speaks {PROTOCOL}; \
+             the running server and your client are different versions"
+        ))
+    })
 }
 
 /// Frame kinds, after the handshake. Length-prefixed binary rather than JSON,
@@ -291,20 +311,54 @@ async fn handle_client<S: AsyncRead + AsyncWrite + Unpin + Send>(
 
     match request {
         Request::Attach { node, protocol } => {
-            if protocol != PROTOCOL {
-                write_line(
-                    &mut stream,
-                    &Response::err(format!(
-                        "protocol {protocol} but this turborust speaks {PROTOCOL}; \
-                         the running server and your client are different versions"
-                    )),
-                )
-                .await?;
+            if let Some(refusal) = version_mismatch(protocol) {
+                write_line(&mut stream, &refusal).await?;
                 return Ok(());
             }
             attach(engine, stream, node).await
         }
+        Request::History {
+            node,
+            limit,
+            protocol,
+        } => {
+            let reply = version_mismatch(protocol).unwrap_or_else(|| {
+                let st = engine.state.lock().unwrap();
+                Response {
+                    history: Some(st.history.recent(node.as_deref(), limit)),
+                    ..Response::ok()
+                }
+            });
+            write_line(&mut stream, &reply).await
+        }
     }
+}
+
+/// The newest history entries from the `turborust up` running here, or `None`
+/// when none is.
+pub async fn history(
+    cache_dir: &Path,
+    node: Option<&str>,
+    limit: usize,
+) -> Result<Option<Vec<crate::state::HistoryRecord>>> {
+    let Ok(mut stream) = transport::connect(&socket_path(cache_dir)).await else {
+        return Ok(None);
+    };
+    write_line(
+        &mut stream,
+        &Request::History {
+            node: node.map(Into::into),
+            limit,
+            protocol: PROTOCOL,
+        },
+    )
+    .await?;
+    let response: Response = serde_json::from_str(&read_line(&mut stream).await?)
+        .context("the server sent something unparseable")?;
+    if !response.ok {
+        bail!("{}", response.error.unwrap_or_else(|| "refused".into()));
+    }
+    Ok(Some(response.history.unwrap_or_default()))
 }
 
 async fn attach<S: AsyncRead + AsyncWrite + Unpin + Send>(
@@ -452,7 +506,9 @@ mod tests {
         .unwrap();
         let line = read_line(&mut b).await.unwrap();
         let parsed: Request = serde_json::from_str(&line).unwrap();
-        let Request::Attach { node, protocol } = parsed;
+        let Request::Attach { node, protocol } = parsed else {
+            panic!("parsed as another request");
+        };
         assert_eq!(node, "api");
         assert_eq!(protocol, PROTOCOL);
     }

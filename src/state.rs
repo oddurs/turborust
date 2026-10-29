@@ -218,18 +218,56 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// One line, for a test that timed out or a bug report.
-    pub fn describe(&self, origin: Instant) -> String {
-        let t = self.at.saturating_duration_since(origin);
-        let what = match &self.fact {
+    /// What happened, in words.
+    pub fn what(&self) -> String {
+        match &self.fact {
             Fact::Status(s) => s.label(),
             Fact::Reason(r) => format!("because {r}"),
             Fact::Restarted(r) => format!("restart counted: {r}"),
             Fact::Spawned(pid) => format!("spawned pid {}", fmt_pid(*pid)),
             Fact::Pid(pid) => format!("pid {}", fmt_pid(*pid)),
-        };
-        format!("#{} +{} {} {what}", self.seq, fmt_dur(t), self.node)
+        }
     }
+
+    /// One line, for a test that timed out or a bug report.
+    pub fn describe(&self, origin: Instant) -> String {
+        let t = self.at.saturating_duration_since(origin);
+        format!(
+            "#{} +{} {} {}",
+            self.seq,
+            fmt_dur(t),
+            self.node,
+            self.what()
+        )
+    }
+
+    /// This entry for the wire, timed from `origin`.
+    pub fn record(&self, origin: Instant) -> HistoryRecord {
+        HistoryRecord {
+            seq: self.seq,
+            ms: self.at.saturating_duration_since(origin).as_millis() as u64,
+            node: self.node.clone(),
+            what: self.what(),
+        }
+    }
+}
+
+/// One history entry as the control socket and the dashboard serve it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct HistoryRecord {
+    pub seq: u64,
+    /// Milliseconds since the session began.
+    pub ms: u64,
+    pub node: String,
+    pub what: String,
+}
+
+/// What a node has been through, counted as it happened — so it survives the
+/// history being summarised (cairn 0110).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct Tally {
+    pub restarts: u32,
+    pub failures: u32,
 }
 
 fn fmt_pid(pid: Option<u32>) -> String {
@@ -290,6 +328,7 @@ pub struct History {
     cap: usize,
     next: u64,
     pub origin: Instant,
+    tallies: BTreeMap<String, Tally>,
 }
 
 impl History {
@@ -300,6 +339,7 @@ impl History {
             cap: cap.max(1),
             next: 1,
             origin: now(),
+            tallies: BTreeMap::new(),
         }
     }
 
@@ -310,6 +350,12 @@ impl History {
         {
             apply(n, &old.fact, old.at);
         }
+        let tally = self.tallies.entry(node.to_string()).or_default();
+        match &fact {
+            Fact::Restarted(_) => tally.restarts += 1,
+            Fact::Status(Status::Failed(_) | Status::Unhealthy) => tally.failures += 1,
+            _ => {}
+        }
         self.entries.push_back(Entry {
             seq: self.next,
             at,
@@ -317,6 +363,25 @@ impl History {
             fact,
         });
         self.next += 1;
+    }
+
+    /// The newest `limit` entries, for `node` or for every node, oldest first.
+    pub fn recent(&self, node: Option<&str>, limit: usize) -> Vec<HistoryRecord> {
+        let mut out: Vec<HistoryRecord> = self
+            .entries
+            .iter()
+            .rev()
+            .filter(|e| node.is_none_or(|n| e.node == n))
+            .take(limit)
+            .map(|e| e.record(self.origin))
+            .collect();
+        out.reverse();
+        out
+    }
+
+    /// Restarts and failures per node, over the whole session.
+    pub fn tallies(&self) -> &BTreeMap<String, Tally> {
+        &self.tallies
     }
 
     pub fn entries(&self) -> impl Iterator<Item = &Entry> {
@@ -769,6 +834,33 @@ mod tests {
             st.history
                 .describe()
                 .starts_with("(393 earlier facts summarised)")
+        );
+    }
+
+    #[test]
+    fn recent_history_is_newest_last_and_can_be_narrowed() {
+        let mut st = seeded(10_000);
+        churn(&mut st, 3);
+        let api = st.history.recent(Some("api"), 4);
+        assert_eq!(api.len(), 4);
+        assert!(api.iter().all(|r| r.node == "api"));
+        assert!(api.windows(2).all(|w| w[0].seq < w[1].seq), "oldest first");
+        assert_eq!(api.last().unwrap().what, "healthy");
+        assert_eq!(st.history.recent(None, 1000).len(), 3 * 8);
+    }
+
+    #[test]
+    fn the_tally_counts_restarts_and_failures_even_after_summarising() {
+        let mut st = seeded(5);
+        churn(&mut st, 20);
+        st.record("build", Fact::Status(Status::Failed(2)));
+        let t = st.history.tallies();
+        assert_eq!(t["api"].restarts, 20, "counted past the 5 entries kept");
+        assert_eq!(t["api"].failures, 0);
+        assert_eq!(t["build"].failures, 1);
+        assert_eq!(
+            t["api"].restarts, st.nodes["api"].restarts,
+            "agrees with the projection"
         );
     }
 
