@@ -48,7 +48,7 @@ exits with, so CI scripts that already check for it read it right.
 
 Found while writing it: telling a timeout by its code is wrong, since a command
 can exit 124 itself. The first draft did, and such a task would never have been marked
-failed, so `run` waited on it forever. `wait_limited` now returns a flag beside
+failed, so `run` would have waited on it forever. `wait_limited` now returns a flag beside
 the code; `a_command_that_exits_124_itself_is_an_ordinary_failure` is the cover.
 
 `alive()` in the test reads `/proc/<pid>/stat` and treats a zombie as gone: an
