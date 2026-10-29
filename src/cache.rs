@@ -31,19 +31,53 @@ impl Fingerprint {
 }
 
 /// Compiles include/exclude globs into a matcher rooted at the workspace.
+#[derive(Clone)]
 pub struct Matcher {
     include: GlobSet,
     exclude: GlobSet,
     empty: bool,
+    /// Where the include globs can match: each one's literal directory
+    /// prefix, or `""` for one that can match anywhere (cairn 0076).
+    roots: Vec<String>,
 }
 
 impl Matcher {
     pub fn new(include: &[String], exclude: &[String]) -> Result<Self> {
+        let mut roots: Vec<String> = include
+            .iter()
+            .map(|g| literal_prefix(g).to_string())
+            .collect();
+        roots.sort();
+        roots.dedup();
         Ok(Matcher {
             include: build_set(include)?,
             exclude: build_set(exclude)?,
             empty: include.is_empty(),
+            roots,
         })
+    }
+
+    /// Whether anything under the directory `dir` (workspace-relative,
+    /// forward slashes, `""` for the root) could match.
+    ///
+    /// A hash walked the whole workspace for every node and then filtered, so
+    /// `crates/api/src/**` read the directory entries of everything else in
+    /// the repository too, once per task. Pruning here keeps the walk to the
+    /// directories a node's globs can reach. The walk still starts at the root,
+    /// so which `.gitignore`s apply is exactly what it was.
+    pub fn may_contain(&self, dir: &str) -> bool {
+        if self.empty {
+            return false;
+        }
+        dir.is_empty()
+            || self.roots.iter().any(|r| {
+                r.is_empty()
+                    || r == dir
+                    // on the way down to `r`
+                    || r.strip_prefix(dir).is_some_and(|rest| rest.starts_with('/'))
+                    // inside `r`
+                    || dir.strip_prefix(r.as_str()).is_some_and(|rest| rest.starts_with('/'))
+            })
     }
 
     pub fn is_empty(&self) -> bool {
@@ -56,6 +90,18 @@ impl Matcher {
             return false;
         }
         self.include.is_match(rel) && !self.exclude.is_match(rel)
+    }
+}
+
+/// The directory a glob can only match inside: everything before the path
+/// component holding its first pattern character. `crates/api/src/**/*.rs`
+/// gives `crates/api/src`; `**/*.rs` and `src*/x` give `""`, anywhere. Sound
+/// even though globset's `*` crosses `/`: whatever a glob matches still starts
+/// with its literal prefix. A glob with no pattern is a path, and is its own.
+fn literal_prefix(glob: &str) -> &str {
+    match glob.find(['*', '?', '[', '{', '\\']) {
+        None => glob,
+        Some(i) => glob[..i].rfind('/').map_or("", |j| &glob[..j]),
     }
 }
 
@@ -87,6 +133,16 @@ pub fn fingerprint_files(root: &Path, matcher: &Matcher) -> Result<BTreeMap<Stri
         .git_ignore(true)
         .git_global(false)
         .parents(false);
+    let (base, prune) = (root.to_path_buf(), matcher.clone());
+    walker.filter_entry(move |e| {
+        if !e.file_type().is_some_and(|t| t.is_dir()) {
+            return true;
+        }
+        let Ok(rel) = e.path().strip_prefix(&base) else {
+            return true;
+        };
+        prune.may_contain(&rel.to_string_lossy().replace('\\', "/"))
+    });
     for entry in walker.build() {
         let entry = match entry {
             Ok(e) => e,
@@ -922,6 +978,86 @@ impl Cache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The walk as it was before pruning, kept as the reference the pruned
+    /// one must agree with.
+    fn every_file_then_filter(root: &Path, matcher: &Matcher) -> BTreeMap<String, String> {
+        let mut walker = ignore::WalkBuilder::new(root);
+        walker
+            .hidden(false)
+            .git_ignore(true)
+            .git_global(false)
+            .parents(false);
+        let mut out = BTreeMap::new();
+        for e in walker.build().flatten() {
+            if !e.file_type().is_some_and(|t| t.is_file()) {
+                continue;
+            }
+            let rel = e
+                .path()
+                .strip_prefix(root)
+                .unwrap()
+                .to_string_lossy()
+                .replace('\\', "/");
+            if matcher.matches(&rel) {
+                let bytes = std::fs::read(e.path()).unwrap();
+                out.insert(rel, blake3::hash(&bytes).to_hex().to_string());
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_pruned_walk_hashes_exactly_what_a_full_one_did() {
+        // Cover for cairn 0076.
+        let root = std::env::temp_dir().join(format!("turborust-prune-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for f in [
+            "Cargo.toml",
+            "crates/api/Cargo.toml",
+            "crates/api/src/main.rs",
+            "crates/api/src/deep/mod.rs",
+            "crates/api/gen/out.rs",
+            "crates/apix/src/lib.rs",
+            "crates/web/src/lib.rs",
+            "src2/x",
+            "tools/a.toml",
+            "docs/big/1.md",
+        ] {
+            let p = root.join(f);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, f).unwrap();
+        }
+        // A root .gitignore reaching into a pruned walk's subtree, which a walk
+        // started below the root would not have read.
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::write(root.join(".gitignore"), "crates/api/gen/\n").unwrap();
+        for globs in [
+            &["crates/api/src/**/*.rs"][..],
+            &["crates/api/**"],
+            &["Cargo.toml"],
+            &["**/*.toml"],
+            &["crates/*/src/**"],
+            &["src*/x"],
+            &["crates/api/src/main.rs", "tools/**"],
+            &["crates/ap*/**"],
+            &["{crates,tools}/**"],
+        ] {
+            let globs: Vec<String> = globs.iter().map(|g| g.to_string()).collect();
+            let m = Matcher::new(&globs, &[]).unwrap();
+            assert_eq!(
+                fingerprint_files(&root, &m).unwrap(),
+                every_file_then_filter(&root, &m),
+                "{globs:?}"
+            );
+        }
+        let m = Matcher::new(&["crates/api/src/**".to_string()], &[]).unwrap();
+        assert!(
+            !m.may_contain("docs") && !m.may_contain("crates/apix") && !m.may_contain("crates/web")
+        );
+        assert!(m.may_contain("crates") && m.may_contain("crates/api/src/deep"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     fn fp(files: &[(&str, &str)]) -> Fingerprint {
         combine(

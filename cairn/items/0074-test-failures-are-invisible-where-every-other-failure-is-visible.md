@@ -81,3 +81,5 @@ The transitive-dependency criterion was already true, and is now pinned by `a_te
 
 A second bug surfaced while verifying this, in 0110's change rather than this one: `run --summarize` deadlocked. Noted and fixed on 0110.
 
+
+A third bug, after this shipped: `run --summarize` could leave out the failures it exists to record. The summary was built before `drain_output`, so issues parsed from a run's last lines were still in the queue when it was taken. Invisible on an idle machine; under load, `run_summarize_writes_its_record_and_exits` failed 6 of 40 parallel runs, and it was the pre-push hook's full-suite run that caught it. Output is now drained first; 0 of 120 under the same load.

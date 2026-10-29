@@ -151,6 +151,10 @@ enum Cmd {
     },
     /// Print the man page, in roff.
     Man,
+    /// Node names in the nearest config, one per line, for shell completion.
+    /// Prints nothing on any error.
+    #[command(name = "__nodes", hide = true)]
+    Nodes,
     /// Print a JSON Schema for turborust.toml, for editor completion, or with
     /// `--json` for one of the JSON payloads turborust prints and serves.
     Schema {
@@ -229,7 +233,21 @@ async fn dispatch(cli: Cli) -> Result<i32> {
         Cmd::Completions { shell } => {
             let mut cmd = <Cli as clap::CommandFactory>::command();
             let name = cmd.get_name().to_string();
-            clap_complete::generate(shell, &mut cmd, name, &mut std::io::stdout());
+            let mut generated = Vec::new();
+            clap_complete::generate(shell, &mut cmd, name, &mut generated);
+            print!(
+                "{}",
+                turborust::complete::script(
+                    shell,
+                    String::from_utf8_lossy(&generated).into_owned()
+                )
+            );
+            Ok(0)
+        }
+        Cmd::Nodes => {
+            for name in turborust::complete::node_names(cli.config.as_deref()) {
+                println!("{name}");
+            }
             Ok(0)
         }
         Cmd::Schema { json: None } => {
@@ -810,6 +828,11 @@ async fn cmd_run(
     })
     .await?;
 
+    // Every line out before exiting, and no longer than that takes: this was a
+    // fixed 60ms sleep, paid by every run whether it printed anything or not.
+    // Before the summary, too: its issues are parsed from those lines, and a
+    // summary taken first missed the last ones whenever the machine was busy.
+    engine.drain_output(Duration::from_millis(200)).await;
     if output.summarize {
         // One guard: two `lock()`s in this literal would both live to the end
         // of the statement, and the second would wait on the first forever.
@@ -831,9 +854,6 @@ async fn cmd_run(
         let path = turborust::summary::write(&ws.cache_dir(), &summary)?;
         println!("summary written to {}", path.display());
     }
-    // Every line out before exiting, and no longer than that takes: this was a
-    // fixed 60ms sleep, paid by every run whether it printed anything or not.
-    engine.drain_output(Duration::from_millis(200)).await;
     Ok(code)
 }
 
