@@ -361,6 +361,52 @@ async fn a_test_task_reruns_when_a_transitive_path_dependency_changes() {
     h.shutdown().await;
 }
 
+/// `why` and anything else outside the `up` ask it what happened over the
+/// control socket (cairn 0110).
+#[tokio::test]
+async fn the_history_can_be_asked_for_over_the_control_socket() {
+    let mut h = Harness::start(
+        "history",
+        r#"
+        [services.api]
+        cmd = "sleep 30"
+        "#,
+        &["api"],
+    );
+    let cache_dir = h.dir.join(".turborust");
+    tokio::spawn(turborust::control::serve(
+        h.engine.clone(),
+        turborust::control::socket_path(&cache_dir),
+    ));
+    h.wait_for("api healthy", |st| {
+        matches!(st.nodes["api"].status, Status::Healthy)
+    })
+    .await;
+    let mut entries = None;
+    for _ in 0..100 {
+        entries = turborust::control::history(&cache_dir, Some("api"), 10)
+            .await
+            .unwrap();
+        if entries.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let entries = entries.expect("the socket answered");
+    let what: Vec<&str> = entries.iter().map(|e| e.what.as_str()).collect();
+    assert_eq!(what.first(), Some(&"starting"), "{what:?}");
+    assert_eq!(what.last(), Some(&"healthy"), "{what:?}");
+    assert!(entries.iter().all(|e| e.node == "api"));
+    h.shutdown().await;
+    assert_eq!(
+        turborust::control::history(&h.dir.join("nowhere"), None, 10)
+            .await
+            .unwrap(),
+        None,
+        "no server is an answer, not an error"
+    );
+}
+
 #[tokio::test]
 async fn crash_backoff_doubles_and_is_capped() {
     let mut h = Harness::start(
