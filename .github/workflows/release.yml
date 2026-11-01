@@ -160,7 +160,7 @@ jobs:
           done > SHA256SUMS
           rm -f *.sha256
           cat SHA256SUMS
-      - uses: actions/attest-build-provenance@v2
+      - uses: actions/attest-build-provenance@v4
         with:
           subject-path: |
             dist/*.tar.gz
