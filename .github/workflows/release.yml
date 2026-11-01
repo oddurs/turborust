@@ -167,7 +167,7 @@ jobs:
             dist/*.zip
       # A version with a suffix (1.0.0-rc.1) is a pre-release, and never marked
       # latest: that is the release an installer takes.
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           files: dist/*
           generate_release_notes: true
